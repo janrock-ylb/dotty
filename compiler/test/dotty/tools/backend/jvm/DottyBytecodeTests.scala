@@ -50,7 +50,7 @@ class TestBCode extends DottyBytecodeTest {
   /** This test verifies that simple matches with `@switch` annotations are
    *  indeed transformed to a switch
    */
-  @Test def basicTransfromAnnotated = {
+  @Test def basicSwitch = {
     val source = """
                  |object Foo {
                  |  import scala.annotation.switch
@@ -66,6 +66,71 @@ class TestBCode extends DottyBytecodeTest {
       val moduleNode = loadClassNode(moduleIn.input)
       val methodNode = getMethod(moduleNode, "foo")
       assert(verifySwitch(methodNode))
+    }
+  }
+
+  @Test def switchWithAlternatives = {
+    val source =
+      """
+        |object Foo {
+        |  import scala.annotation.switch
+        |  def foo(i: Int) = (i: @switch) match {
+        |    case 2 => println(2)
+        |    case 1 | 3 | 5 => println(1)
+        |    case 0 => println(0)
+        |  }
+        |}
+      """.stripMargin
+
+    checkBCode(source) { dir =>
+      val moduleIn   = dir.lookupName("Foo$.class", directory = false)
+      val moduleNode = loadClassNode(moduleIn.input)
+      val methodNode = getMethod(moduleNode, "foo")
+      assert(verifySwitch(methodNode))
+    }
+  }
+
+  @Test def switchWithGuards = {
+    val source =
+      """
+        |object Foo {
+        |  import scala.annotation.switch
+        |  def foo(i: Int, b: Boolean) = (i: @switch) match {
+        |    case 2 => println(3)
+        |    case 1 if b => println(2)
+        |    case 1 => println(1)
+        |    case 0 => println(0)
+        |  }
+        |}
+      """.stripMargin
+
+    checkBCode(source) { dir =>
+      val moduleIn   = dir.lookupName("Foo$.class", directory = false)
+      val moduleNode = loadClassNode(moduleIn.input)
+      val methodNode = getMethod(moduleNode, "foo")
+      assert(verifySwitch(methodNode))
+    }
+  }
+
+  @Test def matchWithDefaultNoThrowMatchError = {
+    val source =
+      """class Test {
+        |  def test(s: String) = s match {
+        |    case "Hello" => 1
+        |    case _       => 2
+        |  }
+        |}
+      """.stripMargin
+
+    checkBCode(source) { dir =>
+      val clsIn = dir.lookupName("Test.class", directory = false)
+      val clsNode = loadClassNode(clsIn.input)
+      val method = getMethod(clsNode, "test")
+      val throwMatchError = instructionsFromMethod(method).exists {
+        case Op(Opcodes.ATHROW) => true
+        case _ => false
+      }
+      assertFalse(throwMatchError)
     }
   }
 
@@ -308,6 +373,326 @@ class TestBCode extends DottyBytecodeTest {
         case _ => false
       }
       assertTrue(callMagic)
+    }
+  }
+
+  @Test def i4172 = {
+    val source =
+      """class Test {
+        |  inline def foo(first: Int*)(second: String = "") = {}
+        |
+        |  def test = {
+        |    foo(1)()
+        |  }
+        |}
+      """.stripMargin
+
+    checkBCode(source) { dir =>
+      val moduleIn = dir.lookupName("Test.class", directory = false)
+      val moduleNode = loadClassNode(moduleIn.input)
+      val method = getMethod(moduleNode, "test")
+
+      val fooInvoke = instructionsFromMethod(method).exists {
+        case inv: Invoke => inv.name == "foo"
+        case _ => false
+      }
+
+      assert(!fooInvoke, "foo should not be called\n")
+    }
+  }
+
+  @Test def returnThrowInPatternMatch = {
+    val source =
+      """class Test {
+        |  def test(a: Any): Int = {
+        |    a match {
+        |      case _: Test => ???
+        |    }
+        |  }
+        |}
+      """.stripMargin
+
+    checkBCode(source) { dir =>
+      val moduleIn = dir.lookupName("Test.class", directory = false)
+      val moduleNode = loadClassNode(moduleIn.input)
+      val method = getMethod(moduleNode, "test")
+
+      val instructions = instructionsFromMethod(method)
+      val expected = List(
+        VarOp(Opcodes.ALOAD, 1),
+        VarOp(Opcodes.ASTORE, 2),
+        VarOp(Opcodes.ALOAD, 2),
+        TypeOp(Opcodes.INSTANCEOF, "Test"),
+        Jump(Opcodes.IFEQ, Label(11)),
+        VarOp(Opcodes.ALOAD, 2),
+        TypeOp(Opcodes.CHECKCAST, "Test"),
+        VarOp(Opcodes.ASTORE, 3),
+        Field(Opcodes.GETSTATIC, "scala/Predef$", "MODULE$", "Lscala/Predef$;"),
+        Invoke(Opcodes.INVOKEVIRTUAL, "scala/Predef$", "$qmark$qmark$qmark", "()Lscala/runtime/Nothing$;", false),
+        Op(Opcodes.ATHROW),
+        Label(11),
+        FrameEntry(1, List("java/lang/Object"), List()),
+        TypeOp(Opcodes.NEW, "scala/MatchError"),
+        Op(Opcodes.DUP),
+        VarOp(Opcodes.ALOAD, 2),
+        Invoke(Opcodes.INVOKESPECIAL, "scala/MatchError", "<init>", "(Ljava/lang/Object;)V", false),
+        Op(Opcodes.ATHROW),
+        Label(18),
+        FrameEntry(0, List(), List("java/lang/Throwable")),
+        Op(Opcodes.ATHROW),
+        Label(21),
+        FrameEntry(4, List(), List("java/lang/Throwable")),
+        Op(Opcodes.ATHROW)
+      )
+      assert(instructions == expected,
+        "`test` was not properly generated\n" + diffInstructions(instructions, expected))
+
+    }
+  }
+
+  /** Test that type lambda applications are properly dealias */
+  @Test def i5090 = {
+    val source =
+      """class Test {
+        |  type T[X] = X
+        |
+        |  def test(i: T[Int]): T[Int] = i
+        |  def ref(i: Int): Int = i
+        |}
+      """.stripMargin
+
+    checkBCode(source) { dir =>
+      val clsIn   = dir.lookupName("Test.class", directory = false).input
+      val clsNode = loadClassNode(clsIn)
+      val test    = getMethod(clsNode, "test")
+      val ref     = getMethod(clsNode, "ref")
+
+      val testInstructions = instructionsFromMethod(test)
+      val refInstructions  = instructionsFromMethod(ref)
+
+      assert(testInstructions == refInstructions,
+        "`T[Int]` was not properly dealias" +
+        diffInstructions(testInstructions, refInstructions))
+    }
+  }
+
+  /** Test that the receiver of a call to a method with varargs is not unnecessarily lifted */
+  @Test def i5191 = {
+    val source =
+      """class Test {
+        |  def foo(args: String*): String = ""
+        |  def self = this
+        |
+        |  def test = self.foo()
+        |}
+      """.stripMargin
+
+    checkBCode(source) { dir =>
+      val clsIn   = dir.lookupName("Test.class", directory = false).input
+      val clsNode = loadClassNode(clsIn)
+      val method  = getMethod(clsNode, "test")
+
+      val liftReceiver = instructionsFromMethod(method).exists {
+        case VarOp(Opcodes.ASTORE, _) => true // receiver lifted in local val
+        case _ => false
+      }
+      assertFalse("Receiver of a call to a method with varargs is unnecessarily lifted",
+        liftReceiver)
+    }
+  }
+
+  /** Test that the size of the lazy val initialiazer is under a certain threshold
+   *
+   *  - Fix to #5340 reduced the size from 39 instructions to 34
+   *  - Fix to #505  reduced the size from 34 instructions to 32
+   */
+  @Test def i5340 = {
+    val source =
+      """class Test {
+        |  def test = {
+        |    lazy val x = 1
+        |    x
+        |  }
+        |}
+      """.stripMargin
+
+    checkBCode(source) { dir =>
+      val clsIn   = dir.lookupName("Test.class", directory = false).input
+      val clsNode = loadClassNode(clsIn)
+      val method  = getMethod(clsNode, "x$lzyINIT1$1")
+      assertEquals(32, instructionsFromMethod(method).size)
+    }
+  }
+
+  /** Test that synchronize blocks don't box */
+  @Test def i505 = {
+    val source =
+      """class Test {
+        |  def test: Int = synchronized(1)
+        |}
+      """.stripMargin
+
+    checkBCode(source) { dir =>
+      val clsIn   = dir.lookupName("Test.class", directory = false).input
+      val clsNode = loadClassNode(clsIn)
+      val method  = getMethod(clsNode, "test")
+
+      val doBox = instructionsFromMethod(method).exists {
+        case Invoke(_, _, name, _, _) =>
+          name == "boxToInteger" || name == "unboxToInt"
+        case _ =>
+          false
+      }
+      assertFalse(doBox)
+    }
+  }
+
+  /** Test that the size of lazy field accesors is under a certain threshold
+   *
+   *  - Changed from 19 to 14
+   */
+  @Test def lazyFields = {
+    val source =
+      """class Test {
+        |  lazy val test = 1
+        |}
+      """.stripMargin
+
+    checkBCode(source) { dir =>
+      val clsIn   = dir.lookupName("Test.class", directory = false).input
+      val clsNode = loadClassNode(clsIn)
+      val method  = getMethod(clsNode, "test")
+      assertEquals(14, instructionsFromMethod(method).size)
+    }
+  }
+
+  /* Test that objects compile to *final* classes. */
+
+  private def checkFinalClass(outputClassName: String, source: String) = {
+    checkBCode(source) {
+      dir =>
+        val moduleIn   = dir.lookupName(outputClassName, directory = false)
+        val moduleNode = loadClassNode(moduleIn.input)
+        assert((moduleNode.access & Opcodes.ACC_FINAL) != 0)
+    }
+  }
+
+  @Test def objectsAreFinal =
+    checkFinalClass("Foo$.class", "object Foo")
+
+  @Test def objectsInClassAreFinal =
+    checkFinalClass("Test$Foo$.class",
+      """class Test {
+        |  object Foo
+        |}
+      """.stripMargin)
+
+  @Test def objectsInObjsAreFinal =
+    checkFinalClass("Test$Foo$.class",
+      """object Test {
+        |  object Foo
+        |}
+      """.stripMargin)
+
+  @Test def objectsInObjDefAreFinal =
+    checkFinalClass("Test$Foo$1$.class",
+      """
+        |object Test {
+        |  def bar() = {
+        |    object Foo
+        |  }
+        |}
+      """.stripMargin)
+
+  @Test def objectsInClassDefAreFinal =
+    checkFinalClass("Test$Foo$1$.class",
+      """
+        |class Test {
+        |  def bar() = {
+        |    object Foo
+        |  }
+        |}
+      """.stripMargin)
+
+  @Test def objectsInObjValAreFinal =
+    checkFinalClass("Test$Foo$1$.class",
+      """
+        |class Test {
+        |  val bar = {
+        |    object Foo
+        |  }
+        |}
+      """.stripMargin)
+
+  @Test def i5750 = {
+    val source =
+      """class Test {
+        |  def foo: String = ""
+        |  def test(cond: Boolean): Int = {
+        |    if (cond) foo
+        |    1
+        |  }
+        |}
+      """.stripMargin
+
+    checkBCode(source) { dir =>
+      val clsIn   = dir.lookupName("Test.class", directory = false).input
+      val clsNode = loadClassNode(clsIn)
+      val method  = getMethod(clsNode, "test")
+
+      val boxUnit = instructionsFromMethod(method).exists {
+        case Field(Opcodes.GETSTATIC, "scala/runtime/BoxedUnit", _, _) =>
+          true
+        case _ =>
+          false
+      }
+      assertFalse(boxUnit)
+    }
+  }
+
+  @Test def i3271 = {
+    val source =
+      """class Test {
+        |  def test = {
+        |    var x = 0
+        |    while(x <= 5) {
+        |      println(x)
+        |      x += 1
+        |    }
+        |  }
+        |}
+      """.stripMargin
+
+    checkBCode(source) { dir =>
+      val clsIn   = dir.lookupName("Test.class", directory = false).input
+      val clsNode = loadClassNode(clsIn)
+      val method  = getMethod(clsNode, "test")
+
+      val instructions = instructionsFromMethod(method)
+
+      val expected = List(
+        Op(Opcodes.ICONST_0),
+        VarOp(Opcodes.ISTORE, 1),
+        Label(2),
+        FrameEntry(1, List(1), List()),
+        VarOp(Opcodes.ILOAD, 1),
+        Op(Opcodes.ICONST_5),
+        Jump(Opcodes.IF_ICMPGT, Label(16)),
+        Field(Opcodes.GETSTATIC, "scala/Predef$", "MODULE$", "Lscala/Predef$;"),
+        VarOp(Opcodes.ILOAD, 1),
+        Invoke(Opcodes.INVOKESTATIC, "scala/runtime/BoxesRunTime", "boxToInteger", "(I)Ljava/lang/Integer;", false),
+        Invoke(Opcodes.INVOKEVIRTUAL, "scala/Predef$", "println", "(Ljava/lang/Object;)V", false),
+        VarOp(Opcodes.ILOAD, 1),
+        Op(Opcodes.ICONST_1),
+        Op(Opcodes.IADD),
+        VarOp(Opcodes.ISTORE, 1),
+        Jump(Opcodes.GOTO, Label(2)),
+        Label(16),
+        FrameEntry(3, List(), List()),
+        Op(Opcodes.RETURN))
+
+      assert(instructions == expected,
+        "`test` was not properly generated\n" + diffInstructions(instructions, expected))
     }
   }
 }

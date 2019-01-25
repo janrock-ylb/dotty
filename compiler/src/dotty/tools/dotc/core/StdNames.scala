@@ -2,13 +2,11 @@ package dotty.tools.dotc
 package core
 
 import scala.language.implicitConversions
-import scala.collection.{mutable, immutable}
+import scala.collection.mutable
 import scala.annotation.switch
 import Names._
 import Symbols._
 import Contexts._
-import Decorators.PreNamedString
-import util.NameTransformer
 
 object StdNames {
 
@@ -42,7 +40,7 @@ object StdNames {
     final val Tuple                      = "Tuple"
     final val Product                    = "Product"
 
-    def sanitize(str: String) = str.replaceAll("""[<>]""", """\$""")
+    def sanitize(str: String): String = str.replaceAll("""[<>]""", """\$""")
   }
 
   abstract class DefinedNames[N <: Name] {
@@ -50,7 +48,7 @@ object StdNames {
     protected def fromName(name: Name): N = fromString(name.toString)
 
     private val kws = mutable.Set[N]()
-    protected def kw(name: N) = { kws += name; name }
+    protected def kw(name: N): N = { kws += name; name }
 
     final val keywords: collection.Set[N] = kws
   }
@@ -76,7 +74,6 @@ object StdNames {
     final val IFkw: N        = kw("if")
     final val IMPLICITkw: N  = kw("implicit")
     final val IMPORTkw: N    = kw("import")
-    final val INLINEkw: N    = kw("inline")
     final val LAZYkw: N      = kw("lazy")
     final val MACROkw: N     = kw("macro")
     final val MATCHkw: N     = kw("match")
@@ -142,8 +139,6 @@ object StdNames {
     val WHILE_PREFIX: N               = "while$"
     val DEFAULT_EXCEPTION_NAME: N     = "ex$"
     val INITIALIZER_PREFIX: N         = "initial$"
-    val COMPANION_MODULE_METHOD: N    = "companion$module"
-    val COMPANION_CLASS_METHOD: N     = "companion$class"
     val BOUNDTYPE_ANNOT: N            = "$boundType$"
     val QUOTE: N                      = "'"
     val TYPE_QUOTE: N                = "type_'"
@@ -204,9 +199,11 @@ object StdNames {
     final val Object: N              = "Object"
     final val PartialFunction: N     = "PartialFunction"
     final val PrefixType: N          = "PrefixType"
+    final val S: N                   = "S"
     final val Serializable: N        = "Serializable"
     final val Singleton: N           = "Singleton"
     final val Throwable: N           = "Throwable"
+    final val IOOBException: N       = "IndexOutOfBoundsException"
 
     final val ClassfileAnnotation: N = "ClassfileAnnotation"
     final val ClassManifest: N       = "ClassManifest"
@@ -246,6 +243,7 @@ object StdNames {
 
     // Compiler-internal
     val ANYname: N                  = "<anyname>"
+    val COMPANION: N                = "<companion>"
     val CONSTRUCTOR: N              = "<init>"
     val STATIC_CONSTRUCTOR: N       = "<clinit>"
     val DEFAULT_CASE: N             = "defaultCase$"
@@ -349,6 +347,7 @@ object StdNames {
     val RootClass: N            = "RootClass"
     val Scala2: N               = "Scala2"
     val Select: N               = "Select"
+    val Shape: N                = "Shape"
     val StringContext: N        = "StringContext"
     val This: N                 = "This"
     val ThisType: N             = "ThisType"
@@ -393,13 +392,16 @@ object StdNames {
     val ClassManifestFactory: N = "ClassManifestFactory"
     val classOf: N              = "classOf"
     val clone_ : N              = "clone"
- //   val conforms : N             = "conforms" // Dotty deviation: no special treatment of conforms, so the occurrence of the name here would cause to unintended implicit shadowing. Should find a less common name for it in Predef.
+    val common: N               = "common"
+    val conforms_ : N           = "$conforms"
     val copy: N                 = "copy"
     val currentMirror: N        = "currentMirror"
     val create: N               = "create"
     val definitions: N          = "definitions"
     val delayedInit: N          = "delayedInit"
     val delayedInitArg: N       = "delayedInit$body"
+    val derived: N              = "derived"
+    val derives: N              = "derives"
     val drop: N                 = "drop"
     val dynamics: N             = "dynamics"
     val elem: N                 = "elem"
@@ -426,6 +428,7 @@ object StdNames {
     val flatMap: N              = "flatMap"
     val foreach: N              = "foreach"
     val genericArrayOps: N      = "genericArrayOps"
+    val genericClass: N         = "genericClass"
     val get: N                  = "get"
     val getClass_ : N           = "getClass"
     val getOrElse: N            = "getOrElse"
@@ -438,6 +441,7 @@ object StdNames {
     val implicitConversions: N  = "implicitConversions"
     val implicitly: N           = "implicitly"
     val in: N                   = "in"
+    val inline: N               = "inline"
     val info: N                 = "info"
     val inlinedEquals: N        = "inlinedEquals"
     val internal: N             = "internal"
@@ -480,15 +484,18 @@ object StdNames {
     val notify_ : N             = "notify"
     val null_ : N               = "null"
     val ofDim: N                = "ofDim"
+    val opaque: N               = "opaque"
+    val ordinal: N              = "ordinal"
     val origin: N               = "origin"
     val prefix : N              = "prefix"
     val productArity: N         = "productArity"
     val productElement: N       = "productElement"
+    val productElementName: N   = "productElementName"
     val productIterator: N      = "productIterator"
     val productPrefix: N        = "productPrefix"
     val raw_ : N                = "raw"
     val readResolve: N          = "readResolve"
-    val reflect : N             = "reflect"
+    val reflect: N              = "reflect"
     val reflectiveSelectable: N = "reflectiveSelectable"
     val reify : N               = "reify"
     val rootMirror : N          = "rootMirror"
@@ -502,7 +509,6 @@ object StdNames {
     val scala_ : N              = "scala"
     val scalaShadowing : N      = "scalaShadowing"
     val selectDynamic: N        = "selectDynamic"
-    val selectDynamicMethod: N  = "selectDynamicMethod"
     val selectOverloadedMethod: N = "selectOverloadedMethod"
     val selectTerm: N           = "selectTerm"
     val selectType: N           = "selectType"
@@ -549,6 +555,7 @@ object StdNames {
     val wait_ : N               = "wait"
     val withFilter: N           = "withFilter"
     val withFilterIfRefutable: N = "withFilterIfRefutable$"
+    val WorksheetWrapper: N     = "WorksheetWrapper"
     val wrap: N                 = "wrap"
     val zero: N                 = "zero"
     val zip: N                  = "zip"
@@ -561,7 +568,7 @@ object StdNames {
     val nothingClass: N         = "Nothing$"
     val nullClass: N            = "Null$"
 
-    val falseModuleClassNames = Set(nothingClass, nullClass, nothingRuntimeClass, nullRuntimeClass)
+    val falseModuleClassNames: Set[N] = Set(nothingClass, nullClass, nothingRuntimeClass, nullRuntimeClass)
 
     // unencoded operators
     object raw {
@@ -612,8 +619,6 @@ object StdNames {
     val toCharacter: N = "toCharacter"
     val toInteger: N   = "toInteger"
 
-    def newLazyValSlowComputeName(lzyValName: N) = lzyValName ++ LAZY_SLOW_SUFFIX
-
     // ASCII names for operators
     val ADD      : N = "+"
     val AND      : N = "&"
@@ -633,8 +638,8 @@ object StdNames {
     val MUL      : N = "*"
     val NE       : N = "!="
     val OR       : N = "|"
-    val PLUS     = ADD    // technically redundant, but ADD looks funny with MINUS
-    val SUB      = MINUS  // ... as does SUB with PLUS
+    val PLUS     : N = ADD    // technically redundant, but ADD looks funny with MINUS
+    val SUB      : N = MINUS  // ... as does SUB with PLUS
     val XOR      : N = "^"
     val ZAND     : N = "&&"
     val ZOR      : N = "||"
@@ -647,11 +652,11 @@ object StdNames {
     val UNARY_! : N = "unary_!"
 
     // Grouped here so Cleanup knows what tests to perform.
-    val CommonOpNames   = Set[Name](OR, XOR, AND, EQ, NE)
-    val ConversionNames = Set[Name](toByte, toChar, toDouble, toFloat, toInt, toLong, toShort)
-    val BooleanOpNames  = Set[Name](ZOR, ZAND, UNARY_!) ++ CommonOpNames
-    val NumberOpNames   = (
-         Set[Name](ADD, SUB, MUL, DIV, MOD, LSL, LSR, ASR, LT, LE, GE, GT)
+    val CommonOpNames: Set[Name]   = Set(OR, XOR, AND, EQ, NE)
+    val ConversionNames: Set[Name] = Set(toByte, toChar, toDouble, toFloat, toInt, toLong, toShort)
+    val BooleanOpNames: Set[Name]  = Set(ZOR, ZAND, UNARY_!) ++ CommonOpNames
+    val NumberOpNames: Set[Name]   = (
+         Set(ADD, SUB, MUL, DIV, MOD, LSL, LSR, ASR, LT, LE, GE, GT)
       ++ Set(UNARY_+, UNARY_-, UNARY_!)
       ++ ConversionNames
       ++ CommonOpNames
@@ -742,7 +747,7 @@ object StdNames {
       val names: Set[Name] = Set(arrayApply, arrayUpdate, arrayLength)
     }
 
-    def isPrimitiveName(name: Name) = primitive.names.contains(name)
+    def isPrimitiveName(name: Name): Boolean = primitive.names.contains(name)
   }
 
   class ScalaTypeNames extends ScalaNames[TypeName] {
@@ -750,7 +755,7 @@ object StdNames {
 
     def syntheticTypeParamName(i: Int): TypeName = "X" + i
 
-    final val Conforms = encode("<:<")
+    final val Conforms: TypeName = encode("<:<")
 
     final val Uninstantiated: TypeName = "?$"
   }
@@ -846,8 +851,8 @@ object StdNames {
     protected def fromString(s: String): TypeName = typeName(s)
   }
 
-  val nme = new ScalaTermNames
-  val tpnme = new ScalaTypeNames
-  val jnme = new JavaTermNames
-  val jtpnme = new JavaTypeNames
+  val nme:    ScalaTermNames = new ScalaTermNames
+  val tpnme:  ScalaTypeNames = new ScalaTypeNames
+  val jnme:   JavaTermNames  = new JavaTermNames
+  val jtpnme: JavaTypeNames  = new JavaTypeNames
 }

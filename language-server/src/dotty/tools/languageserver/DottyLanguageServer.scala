@@ -4,7 +4,7 @@ package languageserver
 import java.net.URI
 import java.io._
 import java.nio.file._
-import java.util.concurrent.CompletableFuture
+import java.util.concurrent.{CompletableFuture, ConcurrentHashMap}
 import java.util.function.Function
 
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -18,16 +18,21 @@ import scala.io.Codec
 
 import dotc._
 import ast.{Trees, tpd}
-import core._, core.Decorators.{sourcePos => _, _}
-import Contexts._, Flags._, Names._, NameOps._, Symbols._, SymDenotations._, Trees._, Types._
+import core._, core.Decorators._
+import Annotations.AnnotInfo
+import Comments._, Constants._, Contexts._, Flags._, Names._, NameOps._, Symbols._, SymDenotations._, Trees._, Types._
 import classpath.ClassPathEntries
-import reporting._, reporting.diagnostic.MessageContainer
-import util._
+import reporting._, reporting.diagnostic.{Message, MessageContainer, messages}
+import typer.Typer
+import util.{Set => _, _}
 import interactive._, interactive.InteractiveDriver._
+import decompiler.IDEDecompilerDriver
 import Interactive.Include
 import config.Printers.interactiv
 
 import languageserver.config.ProjectConfig
+import languageserver.worksheet.{Worksheet, WorksheetService}
+import languageserver.decompiler.{TastyDecompilerService}
 
 import lsp4j.services._
 
@@ -40,7 +45,7 @@ import lsp4j.services._
  *  - This implementation is based on the LSP4J library: https://github.com/eclipse/lsp4j
  */
 class DottyLanguageServer extends LanguageServer
-    with LanguageClientAware with TextDocumentService with WorkspaceService { thisServer =>
+    with TextDocumentService with WorkspaceService with WorksheetService with TastyDecompilerService { thisServer =>
   import ast.tpd._
 
   import DottyLanguageServer._
@@ -52,9 +57,13 @@ class DottyLanguageServer extends LanguageServer
 
 
   private[this] var rootUri: String = _
-  private[this] var client: LanguageClient = _
+
+  private[this] var myClient: DottyClient = _
+  def client: DottyClient = myClient
 
   private[this] var myDrivers: mutable.Map[ProjectConfig, InteractiveDriver] = _
+
+  private[this] var myDependentProjects: mutable.Map[ProjectConfig, mutable.Set[ProjectConfig]] = _
 
   def drivers: Map[ProjectConfig, InteractiveDriver] = thisServer.synchronized {
     if (myDrivers == null) {
@@ -76,6 +85,7 @@ class DottyLanguageServer extends LanguageServer
         val settings =
           defaultFlags ++
           config.compilerArguments.toList
+            .update("-d", config.classDirectory.getAbsolutePath)
             .update("-classpath", (config.classDirectory +: config.dependencyClasspath).mkString(File.pathSeparator))
             .update("-sourcepath", config.sourceDirectories.mkString(File.pathSeparator)) :+
           "-scansource"
@@ -102,23 +112,65 @@ class DottyLanguageServer extends LanguageServer
   private def checkMemory() =
     if (Memory.isCritical()) CompletableFutures.computeAsync { _ => restart() }
 
-  /** The driver instance responsible for compiling `uri` */
-  def driverFor(uri: URI): InteractiveDriver = {
-    val matchingConfig =
+  /** The configuration of the project that owns `uri`. */
+  def configFor(uri: URI): ProjectConfig = thisServer.synchronized {
+    val config =
       drivers.keys.find(config => config.sourceDirectories.exists(sourceDir =>
         new File(uri.getPath).getCanonicalPath.startsWith(sourceDir.getCanonicalPath)))
-    matchingConfig match {
-      case Some(config) =>
-        drivers(config)
-      case None =>
-        val config = drivers.keys.head
-        println(s"No configuration contains $uri as a source file, arbitrarily choosing ${config.id}")
-        drivers(config)
+
+    config.getOrElse {
+      val config = drivers.keys.head
+      // println(s"No configuration contains $uri as a source file, arbitrarily choosing ${config.id}")
+      config
     }
   }
 
-  override def connect(client: LanguageClient): Unit = {
-    this.client = client
+  /** The driver instance responsible for compiling `uri` */
+  def driverFor(uri: URI): InteractiveDriver = {
+    drivers(configFor(uri))
+  }
+
+    /** The driver instance responsible for decompiling `uri` in `classPath` */
+  def decompilerDriverFor(uri: URI, classPath: String): IDEDecompilerDriver = thisServer.synchronized {
+    val config = configFor(uri)
+    val defaultFlags = List("-color:never")
+
+    implicit class updateDeco(ss: List[String]) {
+      def update(pathKind: String, pathInfo: String) = {
+        val idx = ss.indexOf(pathKind)
+        val ss1 = if (idx >= 0) ss.take(idx) ++ ss.drop(idx + 2) else ss
+        ss1 ++ List(pathKind, pathInfo)
+      }
+    }
+    val settings =
+      defaultFlags ++
+      config.compilerArguments.toList
+        .update("-classpath", (classPath +: config.dependencyClasspath).mkString(File.pathSeparator))
+    new IDEDecompilerDriver(settings)
+  }
+
+  /** A mapping from project `p` to the set of projects that transitively depend on `p`. */
+  def dependentProjects: Map[ProjectConfig, Set[ProjectConfig]] = thisServer.synchronized {
+    if (myDependentProjects == null) {
+      val idToConfig = drivers.keys.map(k => k.id -> k).toMap
+      val allProjects = drivers.keySet
+
+      def transitiveDependencies(config: ProjectConfig): Set[ProjectConfig] = {
+        val dependencies = config.projectDependencies.map(idToConfig).toSet
+        dependencies ++ dependencies.flatMap(transitiveDependencies)
+      }
+
+      myDependentProjects = new mutable.HashMap().withDefaultValue(mutable.Set.empty)
+      for { project <- allProjects
+            dependency <- transitiveDependencies(project) } {
+        myDependentProjects(dependency) += project
+      }
+    }
+    myDependentProjects
+  }
+
+  def connect(client: DottyClient): Unit = {
+    myClient = client
   }
 
   override def exit(): Unit = {
@@ -129,10 +181,10 @@ class DottyLanguageServer extends LanguageServer
     CompletableFuture.completedFuture(new Object)
   }
 
-  private[this] def computeAsync[R](fun: CancelChecker => R): CompletableFuture[R] =
+  def computeAsync[R](fun: CancelChecker => R, synchronize: Boolean = true): CompletableFuture[R] =
     CompletableFutures.computeAsync { cancelToken =>
       // We do not support any concurrent use of the compiler currently.
-      thisServer.synchronized {
+      def computation(): R = {
         cancelToken.checkCanceled()
         checkMemory()
         try {
@@ -143,13 +195,20 @@ class DottyLanguageServer extends LanguageServer
             throw ex
         }
       }
+      if (synchronize)
+        thisServer.synchronized { computation() }
+      else
+        computation()
     }
 
   override def initialize(params: InitializeParams) = computeAsync { cancelToken =>
     rootUri = params.getRootUri
     assert(rootUri != null)
 
-    val c = new ServerCapabilities
+    class DottyServerCapabilities(val worksheetRunProvider: Boolean = true,
+                                  val tastyDecompiler: Boolean = true) extends lsp4j.ServerCapabilities
+
+    val c = new DottyServerCapabilities
     c.setTextDocumentSync(TextDocumentSyncKind.Full)
     c.setDocumentHighlightProvider(true)
     c.setDocumentSymbolProvider(true)
@@ -158,9 +217,12 @@ class DottyLanguageServer extends LanguageServer
     c.setHoverProvider(true)
     c.setWorkspaceSymbolProvider(true)
     c.setReferencesProvider(true)
+    c.setImplementationProvider(true)
     c.setCompletionProvider(new CompletionOptions(
       /* resolveProvider = */ false,
       /* triggerCharacters = */ List(".").asJava))
+    c.setSignatureHelpProvider(new SignatureHelpOptions(
+      /* triggerCharacters = */ List("(").asJava))
 
     // Do most of the initialization asynchronously so that we can return early
     // from this method and thus let the client know our capabilities.
@@ -178,30 +240,42 @@ class DottyLanguageServer extends LanguageServer
     val document = params.getTextDocument
     val uri = new URI(document.getUri)
     val driver = driverFor(uri)
+    val worksheetMode = isWorksheet(uri)
 
-    val text = document.getText
+    val (text, positionMapper) =
+      if (worksheetMode) (wrapWorksheet(document.getText), Some(toUnwrappedPosition _))
+      else (document.getText, None)
+
     val diags = driver.run(uri, text)
 
     client.publishDiagnostics(new PublishDiagnosticsParams(
       document.getUri,
-      diags.flatMap(diagnostic).asJava))
+      diags.flatMap(diagnostic(_, positionMapper)(driver.currentCtx)).asJava))
   }
 
-  override def didChange(params: DidChangeTextDocumentParams): Unit = thisServer.synchronized {
-    checkMemory()
+  override def didChange(params: DidChangeTextDocumentParams): Unit = {
     val document = params.getTextDocument
     val uri = new URI(document.getUri)
-    val driver = driverFor(uri)
+    val worksheetMode = isWorksheet(uri)
 
-    val change = params.getContentChanges.get(0)
-    assert(change.getRange == null, "TextDocumentSyncKind.Incremental support is not implemented")
+    thisServer.synchronized  {
+      checkMemory()
 
-    val text = change.getText
-    val diags = driver.run(uri, text)
+      val driver = driverFor(uri)
 
-    client.publishDiagnostics(new PublishDiagnosticsParams(
-      document.getUri,
-      diags.flatMap(diagnostic).asJava))
+      val change = params.getContentChanges.get(0)
+      assert(change.getRange == null, "TextDocumentSyncKind.Incremental support is not implemented")
+
+      val (text, positionMapper) =
+        if (worksheetMode) (wrapWorksheet(change.getText), Some(toUnwrappedPosition _))
+        else (change.getText, None)
+
+      val diags = driver.run(uri, text)
+
+      client.publishDiagnostics(new PublishDiagnosticsParams(
+        document.getUri,
+        diags.flatMap(diagnostic(_, positionMapper)(driver.currentCtx)).asJava))
+    }
   }
 
   override def didClose(params: DidCloseTextDocumentParams): Unit = thisServer.synchronized {
@@ -217,19 +291,19 @@ class DottyLanguageServer extends LanguageServer
   override def didChangeWatchedFiles(params: DidChangeWatchedFilesParams): Unit =
     /*thisServer.synchronized*/ {}
 
-  override def didSave(params: DidSaveTextDocumentParams): Unit =
+  override def didSave(params: DidSaveTextDocumentParams): Unit = {
     /*thisServer.synchronized*/ {}
-
+  }
 
   // FIXME: share code with messages.NotAMember
-  override def completion(params: TextDocumentPositionParams) = computeAsync { cancelToken =>
+  override def completion(params: CompletionParams) = computeAsync { cancelToken =>
     val uri = new URI(params.getTextDocument.getUri)
     val driver = driverFor(uri)
     implicit val ctx = driver.currentCtx
 
     val pos = sourcePosition(driver, uri, params.getPosition)
     val items = driver.compilationUnits.get(uri) match {
-      case Some(unit) => Interactive.completions(pos)(ctx.fresh.setCompilationUnit(unit))._2
+      case Some(unit) => Completion.completions(pos)(ctx.fresh.setCompilationUnit(unit))._2
       case None => Nil
     }
 
@@ -237,10 +311,9 @@ class DottyLanguageServer extends LanguageServer
       /*isIncomplete = */ false, items.map(completionItem).asJava))
   }
 
-  /** If cursor is on a reference, show its definition and all overriding definitions in
-   *  the same source as the primary definition.
+  /** If cursor is on a reference, show its definition and all overriding definitions.
    *  If cursor is on a definition, show this definition together with all overridden
-   *  and overriding definitions (in all sources).
+   *  and overriding definitions.
    */
   override def definition(params: TextDocumentPositionParams) = computeAsync { cancelToken =>
     val uri = new URI(params.getTextDocument.getUri)
@@ -248,47 +321,50 @@ class DottyLanguageServer extends LanguageServer
     implicit val ctx = driver.currentCtx
 
     val pos = sourcePosition(driver, uri, params.getPosition)
-    val enclTree = Interactive.enclosingTree(driver.openedTrees(uri), pos)
-    val sym = Interactive.sourceSymbol(enclTree.symbol)
+    val path = Interactive.pathTo(driver.openedTrees(uri), pos)
 
-    if (sym == NoSymbol) Nil.asJava
-    else {
-      val (trees, include) =
-        if (enclTree.isInstanceOf[MemberDef])
-          (driver.allTreesContaining(sym.name.sourceModuleName.toString),
-           Include.overriding | Include.overridden)
-        else sym.topLevelClass match {
-          case cls: ClassSymbol =>
-            (SourceTree.fromSymbol(cls).toList, Include.overriding)
-          case _ =>
-            (Nil, Include.overriding)
-        }
-      val defs = Interactive.namedTrees(trees, include, sym)
-      defs.map(d => location(d.namePos)).asJava
-    }
+    val definitions = Interactive.findDefinitions(path, pos, driver).toList
+    definitions.flatMap(d => location(d.namePos, positionMapperFor(d.source))).asJava
   }
 
   override def references(params: ReferenceParams) = computeAsync { cancelToken =>
     val uri = new URI(params.getTextDocument.getUri)
     val driver = driverFor(uri)
-    implicit val ctx = driver.currentCtx
 
-    val includeDeclaration = params.getContext.isIncludeDeclaration
-    val pos = sourcePosition(driver, uri, params.getPosition)
-    val sym = Interactive.enclosingSourceSymbol(driver.openedTrees(uri), pos)
-
-    if (sym == NoSymbol) Nil.asJava
-    else {
-      // FIXME: this will search for references in all trees on the classpath, but we really
-      // only need to look for trees in the target directory if the symbol is defined in the
-      // current project
-      val trees = driver.allTreesContaining(sym.name.sourceModuleName.toString)
-      val refs = Interactive.namedTrees(trees, includeReferences = true, (tree: tpd.NameTree) =>
-        (includeDeclaration || !Interactive.isDefinition(tree))
-          && Interactive.matchSymbol(tree, sym, Include.overriding))
-
-      refs.map(ref => location(ref.namePos)).asJava
+    val includes = {
+      val includeDeclaration = params.getContext.isIncludeDeclaration
+      Include.references | Include.overriding | Include.imports | Include.local |
+        (if (includeDeclaration) Include.definitions else Include.empty)
     }
+
+    val uriTrees = driver.openedTrees(uri)
+    val pos = sourcePosition(driver, uri, params.getPosition)
+
+    val (definitions, originalSymbols) = {
+      implicit val ctx: Context = driver.currentCtx
+      val path = Interactive.pathTo(driver.openedTrees(uri), pos)
+      val definitions = Interactive.findDefinitions(path, pos, driver)
+      val originalSymbols = Interactive.enclosingSourceSymbols(path, pos)
+
+      (definitions, originalSymbols)
+    }
+
+    val references = {
+      // Collect the information necessary to look into each project separately: representation of
+      // `originalSymbol` in this project, the context and correct Driver.
+      val perProjectInfo = inProjectsSeeing(driver, definitions, originalSymbols)
+
+      perProjectInfo.flatMap { (remoteDriver, ctx, definitions) =>
+        definitions.flatMap { definition =>
+          val name = definition.name(ctx).sourceModuleName.toString
+          val trees = remoteDriver.sourceTreesContaining(name)(ctx)
+          val matches = Interactive.findTreesMatching(trees, includes, definition)(ctx)
+          matches.map(tree => location(tree.namePos(ctx), positionMapperFor(tree.source)))
+        }
+      }
+    }.toList
+
+    references.flatten.distinct.asJava
   }
 
   override def rename(params: RenameParams) = computeAsync { cancelToken =>
@@ -296,24 +372,66 @@ class DottyLanguageServer extends LanguageServer
     val driver = driverFor(uri)
     implicit val ctx = driver.currentCtx
 
+    val uriTrees = driver.openedTrees(uri)
     val pos = sourcePosition(driver, uri, params.getPosition)
-    val sym = Interactive.enclosingSourceSymbol(driver.openedTrees(uri), pos)
+    val path = Interactive.pathTo(uriTrees, pos)
+    val syms = Interactive.enclosingSourceSymbols(path, pos)
+    val newName = params.getNewName
 
-    if (sym == NoSymbol) new WorkspaceEdit()
-    else {
-      val trees = driver.allTreesContaining(sym.name.sourceModuleName.toString)
-      val linkedSym = sym.linkedClass
-      val newName = params.getNewName
-
-      val refs = Interactive.namedTrees(trees, includeReferences = true, tree =>
-        tree.pos.isSourceDerived
-          && (Interactive.matchSymbol(tree, sym, Include.overriding)
-            || (linkedSym != NoSymbol && Interactive.matchSymbol(tree, linkedSym, Include.overriding))))
-
-      val changes = refs.groupBy(ref => toUri(ref.source).toString).mapValues(_.map(ref => new TextEdit(range(ref.namePos), newName)).asJava)
-
-      new WorkspaceEdit(changes.asJava)
+    def findRenamedReferences(trees: List[SourceTree], syms: List[Symbol], withName: Name): List[SourceTree] = {
+      val includes = Include.all
+      syms.flatMap { sym =>
+        Interactive.findTreesMatching(trees, Include.all, sym, t => Interactive.sameName(t.name, withName))
+      }
     }
+
+    val refs =
+      path match {
+        // Selected a renaming in an import node
+        case Thicket(_ :: (rename: Ident) :: Nil) :: (_: Import) :: rest if rename.span.contains(pos.span) =>
+          findRenamedReferences(uriTrees, syms, rename.name)
+
+        // Selected a reference that has been renamed
+        case (nameTree: NameTree) :: rest if Interactive.isRenamed(nameTree) =>
+          findRenamedReferences(uriTrees, syms, nameTree.name)
+
+        case _ =>
+          val (include, allSymbols) =
+            if (syms.exists(_.allOverriddenSymbols.nonEmpty)) {
+              showMessageRequest(MessageType.Info,
+                RENAME_OVERRIDDEN_QUESTION,
+                List(
+                  RENAME_OVERRIDDEN    -> (() => (Include.all, syms.flatMap(s => s :: s.allOverriddenSymbols.toList))),
+                  RENAME_NO_OVERRIDDEN -> (() => (Include.all.except(Include.overridden), syms)))
+              ).get.getOrElse((Include.empty, Nil))
+            } else {
+              (Include.all, syms)
+            }
+
+          val names = allSymbols.map(_.name.sourceModuleName).toSet
+          val definitions = Interactive.findDefinitions(allSymbols, driver, include.isOverridden, includeExternal = true)
+          val perProjectInfo = inProjectsSeeing(driver, definitions, allSymbols)
+
+          perProjectInfo.flatMap { (remoteDriver, ctx, definitions) =>
+            definitions.flatMap { definition =>
+              val name = definition.name(ctx).sourceModuleName.toString
+              val trees = remoteDriver.sourceTreesContaining(name)(ctx)
+              Interactive.findTreesMatching(trees,
+                                            include,
+                                            definition,
+                                            t => names.exists(Interactive.sameName(t.name, _)))(ctx)
+            }
+          }
+      }
+
+    val changes =
+      refs.groupBy(ref => toUriOption(ref.source))
+        .flatMap((uriOpt, ref) => uriOpt.map(uri => (uri.toString, ref)))
+        .mapValues(refs =>
+          refs.flatMap(ref =>
+            range(ref.namePos, positionMapperFor(ref.source)).map(nameRange => new TextEdit(nameRange, newName))).distinct.asJava)
+
+    new WorkspaceEdit(changes.asJava)
   }
 
   override def documentHighlight(params: TextDocumentPositionParams) = computeAsync { cancelToken =>
@@ -323,15 +441,17 @@ class DottyLanguageServer extends LanguageServer
 
     val pos = sourcePosition(driver, uri, params.getPosition)
     val uriTrees = driver.openedTrees(uri)
-    val sym = Interactive.enclosingSourceSymbol(uriTrees, pos)
+    val path = Interactive.pathTo(uriTrees, pos)
+    val syms = Interactive.enclosingSourceSymbols(path, pos)
+    val includes = Include.all.except(Include.linkedClass)
 
-    if (sym == NoSymbol) Nil.asJava
-    else {
-      val refs = Interactive.namedTrees(uriTrees, Include.references | Include.overriding, sym)
-      ( for (ref <- refs if ref.namePos.exists)
-        yield new DocumentHighlight(range(ref.namePos), DocumentHighlightKind.Read)
-      ).asJava
-    }
+    syms.flatMap { sym =>
+      val refs = Interactive.findTreesMatching(uriTrees, includes, sym)
+      (for {
+        ref <- refs
+        nameRange <- range(ref.namePos, positionMapperFor(ref.source))
+      } yield new DocumentHighlight(nameRange, DocumentHighlightKind.Read))
+    }.distinct.asJava
   }
 
   override def hover(params: TextDocumentPositionParams) = computeAsync { cancelToken =>
@@ -340,13 +460,21 @@ class DottyLanguageServer extends LanguageServer
     implicit val ctx = driver.currentCtx
 
     val pos = sourcePosition(driver, uri, params.getPosition)
-    val tp = Interactive.enclosingType(driver.openedTrees(uri), pos)
+    val trees = driver.openedTrees(uri)
+    val path = Interactive.pathTo(trees, pos)
+    val tp = Interactive.enclosingType(trees, pos)
     val tpw = tp.widenTermRefExpr
 
-    if (tpw == NoType) new Hover
+    if (tp.isError || tpw == NoType) null // null here indicates that no response should be sent
     else {
-      val str = tpw.show.toString
-      new Hover(List(JEither.forLeft(str)).asJava, null)
+      Interactive.enclosingSourceSymbols(path, pos) match {
+        case Nil =>
+          null
+        case symbols =>
+          val docComments = symbols.flatMap(ParsedComment.docOf)
+          val content = hoverContent(Some(tpw.show), docComments)
+          new Hover(content, null)
+      }
     }
   }
 
@@ -357,8 +485,11 @@ class DottyLanguageServer extends LanguageServer
 
     val uriTrees = driver.openedTrees(uri)
 
-    val defs = Interactive.namedTrees(uriTrees, includeReferences = false, _ => true)
-    defs.map(d => symbolInfo(d.tree.symbol, d.namePos)).asJava
+    val defs = Interactive.namedTrees(uriTrees, Include.empty)
+    (for {
+      d <- defs if !isWorksheetWrapper(d)
+      info <- symbolInfo(d.tree.symbol, d.namePos, positionMapperFor(d.source))
+    } yield JEither.forLeft(info)).asJava
   }
 
   override def symbol(params: WorkspaceSymbolParams) = computeAsync { cancelToken =>
@@ -367,10 +498,57 @@ class DottyLanguageServer extends LanguageServer
     drivers.values.toList.flatMap { driver =>
       implicit val ctx = driver.currentCtx
 
-      val trees = driver.allTrees
-      val defs = Interactive.namedTrees(trees, includeReferences = false, nameSubstring = query)
-      defs.map(d => symbolInfo(d.tree.symbol, d.namePos))
+      val trees = driver.sourceTreesContaining(query)
+      val defs = Interactive.namedTrees(trees, Include.empty, _.name.toString.contains(query))
+      defs.flatMap(d => symbolInfo(d.tree.symbol, d.namePos, positionMapperFor(d.source)))
     }.asJava
+  }
+
+  override def implementation(params: TextDocumentPositionParams) = computeAsync { cancelToken =>
+    val uri = new URI(params.getTextDocument.getUri)
+    val driver = driverFor(uri)
+
+    val pos = sourcePosition(driver, uri, params.getPosition)
+
+    val (definitions, originalSymbols) = {
+      implicit val ctx: Context = driver.currentCtx
+      val path = Interactive.pathTo(driver.openedTrees(uri), pos)
+      val originalSymbols = Interactive.enclosingSourceSymbols(path, pos)
+      val definitions = Interactive.findDefinitions(path, pos, driver)
+      (definitions, originalSymbols)
+    }
+
+    val implementations = {
+      val perProjectInfo = inProjectsSeeing(driver, definitions, originalSymbols)
+
+      perProjectInfo.flatMap { (remoteDriver, ctx, definitions) =>
+        val trees = remoteDriver.sourceTrees(ctx)
+        val predicate: NameTree => Boolean = {
+          val predicates = definitions.map(Interactive.implementationFilter(_)(ctx))
+          tree => predicates.exists(_(tree))
+        }
+        val matches = Interactive.namedTrees(trees, Include.local, predicate)(ctx)
+        matches.map(tree => location(tree.namePos(ctx), positionMapperFor(tree.source)))
+      }
+    }.toList
+
+    implementations.flatten.asJava
+  }
+
+  override def signatureHelp(params: TextDocumentPositionParams) = computeAsync { canceltoken =>
+
+    val uri = new URI(params.getTextDocument.getUri)
+    val driver = driverFor(uri)
+    implicit val ctx = driver.currentCtx
+
+    val pos = sourcePosition(driver, uri, params.getPosition)
+    val trees = driver.openedTrees(uri)
+    val path = Interactive.pathTo(trees, pos).dropWhile(!_.isInstanceOf[Apply])
+
+    val (paramN, callableN, alternatives) = Signatures.callInfo(path, pos.span)
+    val signatureInfos = alternatives.flatMap(Signatures.toSignature)
+
+    new SignatureHelp(signatureInfos.map(signatureToSignatureInformation).asJava, callableN, paramN)
   }
 
   override def getTextDocumentService: TextDocumentService = this
@@ -385,36 +563,120 @@ class DottyLanguageServer extends LanguageServer
   override def onTypeFormatting(params: DocumentOnTypeFormattingParams) = null
   override def resolveCodeLens(params: CodeLens) = null
   override def resolveCompletionItem(params: CompletionItem) = null
-  override def signatureHelp(params: TextDocumentPositionParams) = null
+
+  /**
+   * Find the set of projects that have any of `definitions` on their classpath.
+   *
+   * @param definitions The definitions to consider when looking for projects.
+   * @return The set of projects that have any of `definitions` on their classpath.
+   */
+  private def projectsSeeing(definitions: List[SourceTree])(implicit ctx: Context): Set[ProjectConfig] = {
+    if (definitions.isEmpty) {
+      drivers.keySet
+    } else {
+      for {
+        definition <- definitions.toSet
+        uri <- toUriOption(definition.pos.source).toSet
+        config = configFor(uri)
+        project <- dependentProjects(config) + config
+      } yield project
+    }
+  }
+
+  /**
+   * Finds projects that can see any of `definitions`, translate `symbols` in their universe.
+   *
+   * @param baseDriver  The driver responsible for the trees in `definitions` and `symbol`.
+   * @param definitions The definitions to consider when looking for projects.
+   * @param symbol      Symbols to translate in the universes of the remote projects.
+   * @return A list consisting of the remote drivers, their context, and the translation of `symbol`
+   *         into their universe.
+   */
+  private def inProjectsSeeing(baseDriver: InteractiveDriver,
+                               definitions: List[SourceTree],
+                               symbols: List[Symbol]): List[(InteractiveDriver, Context, List[Symbol])] = {
+    val projects = projectsSeeing(definitions)(baseDriver.currentCtx)
+    projects.toList.map { config =>
+      val remoteDriver = drivers(config)
+      val ctx = remoteDriver.currentCtx
+      val definitions = symbols.map(Interactive.localize(_, baseDriver, remoteDriver))
+      (remoteDriver, ctx, definitions)
+    }
+  }
+
+  /**
+   * Send a `window/showMessageRequest` to the client, asking to choose between `choices`, and
+   * perform the associated operation.
+   *
+   * @param tpe     The type of the request
+   * @param message The message accompanying the request
+   * @param choices The choices and their associated operation
+   * @return A future that will complete with the result of executing the action corresponding to
+   *         the user's response.
+   */
+  private def showMessageRequest[T](tpe: MessageType,
+                                    message: String,
+                                    choices: List[(String, () => T)]): CompletableFuture[Option[T]] = {
+    val options = choices.map((title, _) => new MessageActionItem(title))
+    val request = new ShowMessageRequestParams(options.asJava)
+    request.setMessage(message)
+    request.setType(tpe)
+
+    client.showMessageRequest(request).thenApply { (message: MessageActionItem) =>
+      for {
+        answer <- Option(message)
+        (_, action) <- choices.find(_._1 == answer.getTitle)
+      } yield action()
+    }
+  }
 }
 
 object DottyLanguageServer {
   /** Configuration file normally generated by sbt-dotty */
   final val IDE_CONFIG_FILE = ".dotty-ide.json"
 
+  final val RENAME_OVERRIDDEN_QUESTION = "Do you want to rename the base member, or only this member?"
+  final val RENAME_OVERRIDDEN= "Rename the base member"
+  final val RENAME_NO_OVERRIDDEN = "Rename only this member"
+
   /** Convert an lsp4j.Position to a SourcePosition */
   def sourcePosition(driver: InteractiveDriver, uri: URI, pos: lsp4j.Position): SourcePosition = {
+    val actualPosition =
+      if (isWorksheet(uri)) toWrappedPosition(pos)
+      else pos
     val source = driver.openedFiles(uri)
     if (source.exists) {
-      val p = Positions.Position(source.lineToOffset(pos.getLine) + pos.getCharacter)
+      val p = Spans.Span(source.lineToOffset(actualPosition.getLine) + actualPosition.getCharacter)
       new SourcePosition(source, p)
     }
     else NoSourcePosition
   }
 
   /** Convert a SourcePosition to an lsp4j.Range */
-  def range(p: SourcePosition): lsp4j.Range =
-    new lsp4j.Range(
-      new lsp4j.Position(p.startLine, p.startColumn),
-      new lsp4j.Position(p.endLine, p.endColumn)
-    )
+  def range(p: SourcePosition, positionMapper: Option[SourcePosition => SourcePosition] = None): Option[lsp4j.Range] =
+    if (p.exists) {
+      val mappedPosition = positionMapper.map(_(p)).getOrElse(p)
+      Some(new lsp4j.Range(
+        new lsp4j.Position(mappedPosition.startLine, mappedPosition.startColumn),
+        new lsp4j.Position(mappedPosition.endLine, mappedPosition.endColumn)
+      ))
+    } else
+      None
 
   /** Convert a SourcePosition to an lsp4.Location */
-  def location(p: SourcePosition): lsp4j.Location =
-    new lsp4j.Location(toUri(p.source).toString, range(p))
+  def location(p: SourcePosition, positionMapper: Option[SourcePosition => SourcePosition] = None): Option[lsp4j.Location] =
+    for {
+      uri <- toUriOption(p.source)
+      r <- range(p, positionMapper)
+    } yield new lsp4j.Location(uri.toString, r)
 
-  /** Convert a MessageContainer to an lsp4j.Diagnostic */
-  def diagnostic(mc: MessageContainer): Option[lsp4j.Diagnostic] =
+  /**
+   * Convert a MessageContainer to an lsp4j.Diagnostic. The positions are transformed vy
+   * `positionMapper`.
+   */
+  def diagnostic(mc: MessageContainer,
+                 positionMapper: Option[SourcePosition => SourcePosition] = None
+                )(implicit ctx: Context): Option[lsp4j.Diagnostic] =
     if (!mc.pos.exists)
       None // diagnostics without positions are not supported: https://github.com/Microsoft/language-server-protocol/issues/249
     else {
@@ -432,17 +694,120 @@ object DottyLanguageServer {
         }
       }
 
-      val code = mc.contained().errorId.errorNumber.toString
-      Some(new lsp4j.Diagnostic(
-        range(mc.pos), mc.message, severity(mc.level), /*source =*/ "", code))
+      val message = mc.contained()
+      if (displayMessage(message, mc.pos.source)) {
+        val code = message.errorId.errorNumber.toString
+        range(mc.pos, positionMapper).map(r =>
+            new lsp4j.Diagnostic(
+              r, mc.message, severity(mc.level), /*source =*/ "", code))
+      } else {
+        None
+      }
     }
 
-  /** Create an lsp4j.CompletionItem from a Symbol */
-  def completionItem(sym: Symbol)(implicit ctx: Context): lsp4j.CompletionItem = {
+  /**
+   * Check whether `message` should be displayed in the IDE.
+   *
+   * Currently we only filter out the warning about pure expressions in statement position when they
+   * are immediate children of the worksheet wrapper.
+   *
+   * @param message    The message to filter.
+   * @param sourceFile The sourcefile from which `message` originates.
+   * @return true if the message should be displayed in the IDE, false otherwise.
+   */
+  private def displayMessage(message: Message, sourceFile: SourceFile)(implicit ctx: Context): Boolean = {
+    if (isWorksheet(sourceFile)) {
+      message match {
+        case messages.PureExpressionInStatementPosition(_, exprOwner) =>
+          val ownerSym = if (exprOwner.isLocalDummy) exprOwner.owner else exprOwner
+          !isWorksheetWrapper(ownerSym)
+        case _ =>
+          true
+      }
+    } else {
+      true
+    }
+  }
+
+  /** Does this URI represent a worksheet? */
+  private def isWorksheet(uri: URI): Boolean =
+    uri.toString.endsWith(".sc")
+
+  /** Does this sourcefile represent a worksheet? */
+  private def isWorksheet(sourcefile: SourceFile): Boolean =
+    sourcefile.file.extension == "sc"
+
+  /** Wrap the source of a worksheet inside an `object`. */
+  private def wrapWorksheet(source: String): String =
+    s"""object ${StdNames.nme.WorksheetWrapper} {
+       |$source
+       |}""".stripMargin
+
+  /**
+   * Map `position` in a wrapped worksheet to the same position in the unwrapped source.
+   *
+   * Because worksheet are wrapped in an `object`, the positions in the source are one line
+   * above from what the compiler sees.
+   *
+   * @see wrapWorksheet
+   * @param position The position as seen by the compiler (after wrapping)
+   * @return The position in the actual source file (before wrapping).
+   */
+  private def toUnwrappedPosition(position: SourcePosition): SourcePosition = {
+    new SourcePosition(position.source, position.span, position.outer) {
+      override def startLine: Int = position.startLine - 1
+      override def endLine: Int = position.endLine - 1
+    }
+  }
+
+  /**
+   * Map `position` in an unwrapped worksheet to the same position in the wrapped source.
+   *
+   * Because worksheet are wrapped in an `object`, the positions in the source are one line
+   * above from what the compiler sees.
+   *
+   * @see wrapWorksheet
+   * @param position The position as seen by VSCode (before wrapping)
+   * @return The position as seen by the compiler (after wrapping)
+   */
+  private def toWrappedPosition(position: lsp4j.Position): lsp4j.Position = {
+    new lsp4j.Position(position.getLine + 1, position.getCharacter)
+  }
+
+  /**
+   * Returns the position mapper necessary to unwrap positions for `sourcefile`. If `sourcefile` is
+   * not a worksheet, no mapper is necessary. Otherwise, return `toUnwrappedPosition`.
+   */
+  private def positionMapperFor(sourcefile: SourceFile): Option[SourcePosition => SourcePosition] = {
+    if (isWorksheet(sourcefile)) Some(toUnwrappedPosition _)
+    else None
+  }
+
+  /**
+   * Is `sourceTree` the wrapper object that we put around worksheet sources?
+   *
+   * @see wrapWorksheet
+   */
+  def isWorksheetWrapper(sourceTree: SourceTree)(implicit ctx: Context): Boolean = {
+    isWorksheet(sourceTree.source) && isWorksheetWrapper(sourceTree.tree.symbol)
+  }
+
+  /**
+   * Is this symbol the wrapper object that we put around worksheet sources?
+   *
+   * @see wrapWorksheet
+   */
+  def isWorksheetWrapper(symbol: Symbol)(implicit ctx: Context): Boolean = {
+      symbol.name == StdNames.nme.WorksheetWrapper.moduleClassName &&
+      symbol.owner == ctx.definitions.EmptyPackageClass
+  }
+
+  /** Create an lsp4j.CompletionItem from a completion result */
+  def completionItem(completion: Completion)(implicit ctx: Context): lsp4j.CompletionItem = {
     def completionItemKind(sym: Symbol)(implicit ctx: Context): lsp4j.CompletionItemKind = {
       import lsp4j.{CompletionItemKind => CIK}
 
-      if (sym.is(Package))
+      if (sym.is(Package) || sym.is(Module))
         CIK.Module // No CompletionItemKind.Package (https://github.com/Microsoft/language-server-protocol/issues/155)
       else if (sym.isConstructor)
         CIK.Constructor
@@ -456,15 +821,52 @@ object DottyLanguageServer {
         CIK.Field
     }
 
-    val label = sym.name.show.toString
-    val item = new lsp4j.CompletionItem(label)
-    item.setDetail(sym.info.widenTermRefExpr.show.toString)
-    item.setKind(completionItemKind(sym))
+    val item = new lsp4j.CompletionItem(completion.label)
+    item.setDetail(completion.description)
+
+    val documentation = for {
+      sym <- completion.symbols
+      doc <- ParsedComment.docOf(sym)
+    } yield doc
+
+    if (documentation.nonEmpty) {
+      item.setDocumentation(hoverContent(None, documentation))
+    }
+
+    item.setDeprecated(completion.symbols.forall(_.isDeprecated))
+    completion.symbols.headOption.foreach(s => item.setKind(completionItemKind(s)))
     item
   }
 
+  def markupContent(content: String): lsp4j.MarkupContent = {
+    if (content.isEmpty) null
+    else {
+      val markup = new lsp4j.MarkupContent
+      markup.setKind("markdown")
+      markup.setValue(content.trim)
+      markup
+    }
+  }
+
+  private def hoverContent(typeInfo: Option[String],
+                           comments: List[ParsedComment]
+                          )(implicit ctx: Context): lsp4j.MarkupContent = {
+    val buf = new StringBuilder
+    typeInfo.foreach { info =>
+      buf.append(s"""```scala
+                    |$info
+                    |```
+                    |""".stripMargin)
+    }
+    comments.foreach { comment =>
+      buf.append(comment.renderAsMarkdown)
+    }
+
+    markupContent(buf.toString)
+  }
+
   /** Create an lsp4j.SymbolInfo from a Symbol and a SourcePosition */
-  def symbolInfo(sym: Symbol, pos: SourcePosition)(implicit ctx: Context): lsp4j.SymbolInformation = {
+  def symbolInfo(sym: Symbol, pos: SourcePosition, positionMapper: Option[SourcePosition => SourcePosition])(implicit ctx: Context): Option[lsp4j.SymbolInformation] = {
     def symbolKind(sym: Symbol)(implicit ctx: Context): lsp4j.SymbolKind = {
       import lsp4j.{SymbolKind => SK}
 
@@ -472,6 +874,8 @@ object DottyLanguageServer {
         SK.Package
       else if (sym.isConstructor)
         SK.Constructor
+      else if (sym.is(Module))
+        SK.Module
       else if (sym.isClass)
         SK.Class
       else if (sym.is(Mutable))
@@ -482,13 +886,39 @@ object DottyLanguageServer {
         SK.Field
     }
 
-    val name = sym.name.show.toString
+    val name = sym.name.stripModuleClassSuffix.show
     val containerName =
       if (sym.owner.exists && !sym.owner.isEmptyPackage)
-        sym.owner.name.show.toString
+        sym.owner.name.show
       else
         null
 
-    new lsp4j.SymbolInformation(name, symbolKind(sym), location(pos), containerName)
+    location(pos, positionMapper).map(l => new lsp4j.SymbolInformation(name, symbolKind(sym), l, containerName))
+  }
+
+  /** Convert `signature` to a `SignatureInformation` */
+  def signatureToSignatureInformation(signature: Signatures.Signature): lsp4j.SignatureInformation = {
+    val paramInfoss = signature.paramss.map(_.map(paramToParameterInformation))
+    val paramLists = signature.paramss.map { paramList =>
+      val labels = paramList.map(_.show)
+      val prefix = if (paramList.exists(_.isImplicit)) "implicit " else ""
+      labels.mkString(prefix, ", ", "")
+    }.mkString("(", ")(", ")")
+    val tparamsLabel = if (signature.tparams.isEmpty) "" else signature.tparams.mkString("[", ", ", "]")
+    val returnTypeLabel = signature.returnType.map(t => s": $t").getOrElse("")
+    val label = s"${signature.name}$tparamsLabel$paramLists$returnTypeLabel"
+    val documentation = signature.doc.map(DottyLanguageServer.markupContent)
+    val sig = new lsp4j.SignatureInformation(label)
+    sig.setParameters(paramInfoss.flatten.asJava)
+    documentation.foreach(sig.setDocumentation(_))
+    sig
+  }
+
+  /** Convert `param` to `ParameterInformation` */
+  private def paramToParameterInformation(param: Signatures.Param): lsp4j.ParameterInformation = {
+    val documentation = param.doc.map(DottyLanguageServer.markupContent)
+    val info = new lsp4j.ParameterInformation(param.show)
+    documentation.foreach(info.setDocumentation(_))
+    info
   }
 }

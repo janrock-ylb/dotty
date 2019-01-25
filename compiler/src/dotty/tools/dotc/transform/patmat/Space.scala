@@ -243,7 +243,7 @@ trait SpaceLogic {
         else a
       case (Typ(tp1, _), Prod(tp2, fun, sym, ss, true)) =>
         // rationale: every instance of `tp1` is covered by `tp2(_)`
-        if (isSubType(tp1, tp2)) minus(Prod(tp2, fun, sym, signature(fun, sym, ss.length).map(Typ(_, false)), true), b)
+        if (isSubType(tp1, tp2)) minus(Prod(tp1, fun, sym, signature(fun, sym, ss.length).map(Typ(_, false)), true), b)
         else if (canDecompose(tp1)) tryDecompose1(tp1)
         else a
       case (_, Or(ss)) =>
@@ -292,9 +292,13 @@ class SpaceEngine(implicit ctx: Context) extends SpaceLogic {
   private val nullType             = ConstantType(Constant(null))
   private val nullSpace            = Typ(nullType)
 
-  override def intersectUnrelatedAtomicTypes(tp1: Type, tp2: Type) = {
+  override def intersectUnrelatedAtomicTypes(tp1: Type, tp2: Type): Space = {
+    // Precondition: !isSubType(tp1, tp2) && !isSubType(tp2, tp1)
+    if (tp1 == nullType || tp2 == nullType) {
+      // Since projections of types don't include null, intersection with null is empty.
+      return Empty
+    }
     val and = AndType(tp1, tp2)
-    // Precondition: !(tp1 <:< tp2) && !(tp2 <:< tp1)
     // Then, no leaf of the and-type tree `and` is a subtype of `and`.
     val res = inhabited(and)
 
@@ -351,7 +355,7 @@ class SpaceEngine(implicit ctx: Context) extends SpaceLogic {
   }
 
   /* Erase pattern bound types with WildcardType */
-  def erase(tp: Type) = {
+  def erase(tp: Type): Type = {
     def isPatternTypeSymbol(sym: Symbol) = !sym.isClass && sym.is(Case)
 
     val map = new TypeMap {
@@ -656,18 +660,18 @@ class SpaceEngine(implicit ctx: Context) extends SpaceLogic {
     // Fix subtype checking for child instantiation,
     // such that `Foo(Test.this.foo) <:< Foo(Foo.this)`
     // See tests/patmat/i3938.scala
-    def removeThisType(implicit ctx: Context) = new TypeMap {
-      // is in tvarBounds? Don't create new tvars if true
-      private var tvarBounds: Boolean = false
+    class RemoveThisMap extends TypeMap {
+      var prefixTVar: Type = null
       def apply(tp: Type): Type = tp match {
         case ThisType(tref: TypeRef) if !tref.symbol.isStaticOwner =>
           if (tref.symbol.is(Module))
             TermRef(this(tref.prefix), tref.symbol.sourceModule)
-          else if (tvarBounds)
+          else if (prefixTVar != null)
             this(tref)
           else {
-            tvarBounds = true
-            newTypeVar(TypeBounds.upper(this(tref)))
+            prefixTVar = WildcardType  // prevent recursive call from assigning it
+            prefixTVar = newTypeVar(TypeBounds.upper(this(tref)))
+            prefixTVar
           }
         case tp => mapOver(tp)
       }
@@ -681,13 +685,17 @@ class SpaceEngine(implicit ctx: Context) extends SpaceLogic {
       }
     }
 
-    val force = new ForceDegree.Value(
-      tvar => !(ctx.typerState.constraint.entry(tvar.origin) eq tvar.origin.underlying),
-      minimizeAll = false
-    )
-
+    val removeThisType = new RemoveThisMap
     val tvars = tp1.typeParams.map { tparam => newTypeVar(tparam.paramInfo.bounds) }
     val protoTp1 = removeThisType.apply(tp1).appliedTo(tvars)
+
+    val force = new ForceDegree.Value(
+      tvar =>
+        !(ctx.typerState.constraint.entry(tvar.origin) `eq` tvar.origin.underlying) ||
+        (tvar `eq` removeThisType.prefixTVar),
+      minimizeAll = false,
+      allowBottom = false
+    )
 
     // If parent contains a reference to an abstract type, then we should
     // refine subtype checking to eliminate abstract types according to
@@ -722,6 +730,7 @@ class SpaceEngine(implicit ctx: Context) extends SpaceLogic {
     val res =
       (tp.classSymbol.is(Sealed) &&
         tp.classSymbol.is(AbstractOrTrait) &&
+        !tp.classSymbol.hasAnonymousChild &&
         tp.classSymbol.children.nonEmpty ) ||
       dealiasedTp.isInstanceOf[OrType] ||
       (dealiasedTp.isInstanceOf[AndType] && {
@@ -824,8 +833,8 @@ class SpaceEngine(implicit ctx: Context) extends SpaceLogic {
     /** does the companion object of the given symbol have custom unapply */
     def hasCustomUnapply(sym: Symbol): Boolean = {
       val companion = sym.companionModule
-      companion.findMember(nme.unapply, NoPrefix, excluded = Synthetic).exists ||
-        companion.findMember(nme.unapplySeq, NoPrefix, excluded = Synthetic).exists
+      companion.findMember(nme.unapply, NoPrefix, required = EmptyFlagConjunction, excluded = Synthetic).exists ||
+        companion.findMember(nme.unapplySeq, NoPrefix, required = EmptyFlagConjunction, excluded = Synthetic).exists
     }
 
     def doShow(s: Space, mergeList: Boolean = false): String = s match {
@@ -841,6 +850,8 @@ class SpaceEngine(implicit ctx: Context) extends SpaceLogic {
           if (mergeList) "_: _*" else "_: List"
         else if (scalaConsType.isRef(sym))
           if (mergeList) "_, _: _*"  else "List(_, _: _*)"
+        else if (tp.classSymbol.is(Sealed) && tp.classSymbol.hasAnonymousChild)
+          "_: " + showType(tp) + " (anonymous)"
         else if (tp.classSymbol.is(CaseClass) && !hasCustomUnapply(tp.classSymbol))
         // use constructor syntax for case class
           showType(tp) + params(tp).map(_ => "_").mkString("(", ", ", ")")
@@ -913,7 +924,7 @@ class SpaceEngine(implicit ctx: Context) extends SpaceLogic {
       }
 
     if (uncovered.nonEmpty)
-      ctx.warning(PatternMatchExhaustivity(show(Or(uncovered))), sel.pos)
+      ctx.warning(PatternMatchExhaustivity(show(Or(uncovered))), sel.sourcePos)
   }
 
   private def redundancyCheckable(sel: Tree): Boolean =
@@ -962,14 +973,14 @@ class SpaceEngine(implicit ctx: Context) extends SpaceLogic {
         if (covered == Empty) covered = curr
 
         if (isSubspace(covered, prevs)) {
-          ctx.warning(MatchCaseUnreachable(), pat.pos)
+          ctx.warning(MatchCaseUnreachable(), pat.sourcePos)
         }
 
         // if last case is `_` and only matches `null`, produce a warning
         if (i == cases.length - 1 && !isNull(pat) ) {
           simplify(minus(covered, prevs)) match {
             case Typ(`nullType`, _) =>
-              ctx.warning(MatchCaseOnlyNullWarning(), pat.pos)
+              ctx.warning(MatchCaseOnlyNullWarning(), pat.sourcePos)
             case _ =>
           }
 

@@ -1,6 +1,6 @@
 
 import scala.quoted._
-import dotty.tools.dotc.quoted.Toolbox._
+import scala.quoted.Toolbox.Default._
 
 import liftable.Units._
 import liftable.Lets._
@@ -11,6 +11,7 @@ import liftable.Exprs._
 
 object Test {
   def main(args: Array[String]): Unit = {
+    implicit val toolbox: scala.quoted.Toolbox = scala.quoted.Toolbox.make
 
     val liftedUnit: Expr[Unit] = '()
 
@@ -52,7 +53,9 @@ package liftable {
   }
 
   object Units {
-    implicit def UnitIsLiftable: Liftable[Unit] = _=> '{ () }
+    implicit def UnitIsLiftable: Liftable[Unit] = new Liftable[Unit] {
+      def toExpr(x: Unit): Expr[Unit] = '()
+    }
   }
 
   object Lets {
@@ -71,20 +74,26 @@ package liftable {
 
   object Tuples {
 
-    implicit def Tuple1IsLiftable[T1: Liftable](implicit t1: Type[T1]): Liftable[Tuple1[T1]] = {
-      case Tuple1(x1: T1) => '{ Tuple1[~t1](~x1.toExpr) }
+    implicit def Tuple1IsLiftable[T1: Liftable](implicit t1: Type[T1]): Liftable[Tuple1[T1]] = new Liftable[Tuple1[T1]] {
+      def toExpr(x: Tuple1[T1]): Expr[Tuple1[T1]] =
+        '{ Tuple1[~t1](~x._1.toExpr) }
     }
 
-    implicit def Tuple2IsLiftable[T1: Liftable, T2: Liftable](implicit t1: Type[T1], t2: Type[T2]): Liftable[(T1, T2)] = {
-      x => '{ Tuple2[~t1, ~t2](~x._1.toExpr, ~x._2.toExpr) }
+    implicit def Tuple2IsLiftable[T1: Liftable, T2: Liftable](implicit t1: Type[T1], t2: Type[T2]): Liftable[(T1, T2)] = new Liftable[(T1, T2)] {
+      def toExpr(x: (T1, T2)): Expr[(T1, T2)] =
+        '{ Tuple2[~t1, ~t2](~x._1.toExpr, ~x._2.toExpr) }
+
     }
 
-    implicit def Tuple3IsLiftable[T1: Liftable, T2: Liftable, T3: Liftable](implicit t1: Type[T1], t2: Type[T2], t3: Type[T3]): Liftable[(T1, T2, T3)] = {
-      x => '{ Tuple3[~t1, ~t2, ~t3](~x._1.toExpr, ~x._2.toExpr, ~x._3.toExpr) }
+    implicit def Tuple3IsLiftable[T1: Liftable, T2: Liftable, T3: Liftable](implicit t1: Type[T1], t2: Type[T2], t3: Type[T3]): Liftable[(T1, T2, T3)] = new Liftable[(T1, T2, T3)] {
+      def toExpr(x: (T1, T2, T3)): Expr[(T1, T2, T3)] =
+        '{ Tuple3[~t1, ~t2, ~t3](~x._1.toExpr, ~x._2.toExpr, ~x._3.toExpr) }
+
     }
 
-    implicit def Tuple4IsLiftable[T1: Liftable, T2: Liftable, T3: Liftable, T4: Liftable](implicit t1: Type[T1], t2: Type[T2], t3: Type[T3], t4: Type[T4]): Liftable[(T1, T2, T3, T4)] = {
-      x => '{ Tuple4[~t1, ~t2, ~t3, ~t4](~x._1.toExpr, ~x._2.toExpr, ~x._3.toExpr, ~x._4.toExpr) }
+    implicit def Tuple4IsLiftable[T1: Liftable, T2: Liftable, T3: Liftable, T4: Liftable](implicit t1: Type[T1], t2: Type[T2], t3: Type[T3], t4: Type[T4]): Liftable[(T1, T2, T3, T4)] = new Liftable[(T1, T2, T3, T4)] {
+      def toExpr(x: (T1, T2, T3, T4)): Expr[(T1, T2, T3, T4)] =
+        '{ Tuple4[~t1, ~t2, ~t3, ~t4](~x._1.toExpr, ~x._2.toExpr, ~x._3.toExpr, ~x._4.toExpr) }
     }
 
     // TODO more tuples
@@ -93,9 +102,11 @@ package liftable {
 
 
   object Lists {
-    implicit def ListIsLiftable[T: Liftable](implicit t: Type[T]): Liftable[List[T]] = {
-      case x :: xs  => '{ (~xs.toExpr).::[~t](~x.toExpr) }
-      case Nil => '{ Nil: List[~t] }
+    implicit def ListIsLiftable[T: Liftable](implicit t: Type[T]): Liftable[List[T]] = new Liftable[List[T]] {
+      def toExpr(x: List[T]): Expr[List[T]] = x match {
+        case x :: xs  => '{ (~xs.toExpr).::[~t](~x.toExpr) }
+        case Nil => '{ Nil: List[~t] }
+      }
     }
 
     implicit class LiftedOps[T: Liftable](list: Expr[List[T]])(implicit t: Type[T]) {
@@ -117,8 +128,8 @@ package liftable {
     }
 
     object Arrays {
-      implicit def ArrayIsLiftable[T: Liftable](implicit t: Type[T], ct: Expr[ClassTag[T]]): Liftable[Array[T]] = (arr: Array[T]) => '{
-        new Array[~t](~arr.length.toExpr)(~ct)
+      implicit def ArrayIsLiftable[T: Liftable](implicit t: Type[T], ct: Expr[ClassTag[T]]): Liftable[Array[T]] = new Liftable[Array[T]] {
+        def toExpr(arr: Array[T]): Expr[Array[T]] = '{ new Array[~t](~arr.length.toExpr)(~ct) }
       }
     }
 

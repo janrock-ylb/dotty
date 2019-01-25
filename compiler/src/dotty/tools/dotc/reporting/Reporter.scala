@@ -2,6 +2,8 @@ package dotty.tools
 package dotc
 package reporting
 
+import scala.annotation.internal.sharable
+
 import core.Contexts._
 import util.{SourcePosition, NoSourcePosition}
 import core.Decorators.PhaseListDecorator
@@ -23,9 +25,18 @@ object Reporter {
           simple.report(m)
       }
     }
-}
 
-import Reporter._
+  /** A reporter that ignores reports, and doesn't record errors */
+  @sharable object NoReporter extends Reporter {
+    def doReport(m: MessageContainer)(implicit ctx: Context): Unit = ()
+    override def report(m: MessageContainer)(implicit ctx: Context): Unit = ()
+  }
+
+  type ErrorHandler = (MessageContainer, Context) => Unit
+
+  private val defaultIncompleteHandler: ErrorHandler =
+    (mc, ctx) => ctx.reporter.report(mc)(ctx)
+}
 
 trait Reporting { this: Context =>
 
@@ -43,7 +54,7 @@ trait Reporting { this: Context =>
     }
 
   def deprecationWarning(msg: => Message, pos: SourcePosition = NoSourcePosition): Unit =
-    reportWarning(new DeprecationWarning(msg, pos))
+    if (this.settings.deprecation.value) reportWarning(new DeprecationWarning(msg, pos))
 
   def migrationWarning(msg: => Message, pos: SourcePosition = NoSourcePosition): Unit =
     reportWarning(new MigrationWarning(msg, pos))
@@ -114,10 +125,10 @@ trait Reporting { this: Context =>
     informProgress(msg + elapsed)
   }
 
-  def informProgress(msg: => String) =
+  def informProgress(msg: => String): Unit =
     inform("[" + msg + "]")
 
-  def logWith[T](msg: => String)(value: T) = {
+  def logWith[T](msg: => String)(value: T): T = {
     log(msg + " " + value)
     value
   }
@@ -131,6 +142,7 @@ trait Reporting { this: Context =>
  * error messages.
  */
 abstract class Reporter extends interfaces.ReporterResult {
+  import Reporter._
 
   /** Report a diagnostic */
   def doReport(m: MessageContainer)(implicit ctx: Context): Unit
@@ -140,7 +152,7 @@ abstract class Reporter extends interfaces.ReporterResult {
    *  invisible due to the max message length.
    */
   private[this] var _truncationOK: Boolean = true
-  def truncationOK = _truncationOK
+  def truncationOK: Boolean = _truncationOK
   def withoutTruncating[T](body: => T): T = {
     val saved = _truncationOK
     _truncationOK = false
@@ -148,8 +160,8 @@ abstract class Reporter extends interfaces.ReporterResult {
     finally _truncationOK = saved
   }
 
-  type ErrorHandler = MessageContainer => Context => Unit
-  private[this] var incompleteHandler: ErrorHandler = d => c => report(d)(c)
+  private[this] var incompleteHandler: ErrorHandler = defaultIncompleteHandler
+
   def withIncompleteHandler[T](handler: ErrorHandler)(op: => T): T = {
     val saved = incompleteHandler
     incompleteHandler = handler
@@ -157,17 +169,19 @@ abstract class Reporter extends interfaces.ReporterResult {
     finally incompleteHandler = saved
   }
 
-  var errorCount = 0
-  var warningCount = 0
-  def hasErrors = errorCount > 0
-  def hasWarnings = warningCount > 0
+  private[this] var _errorCount = 0
+  private[this] var _warningCount = 0
+  def errorCount: Int = _errorCount
+  def warningCount: Int = _warningCount
+  def hasErrors: Boolean = errorCount > 0
+  def hasWarnings: Boolean = warningCount > 0
   private[this] var errors: List[Error] = Nil
-  def allErrors = errors
+  def allErrors: List[Error] = errors
 
   /** Have errors been reported by this reporter, or in the
    *  case where this is a StoreReporter, by an outer reporter?
    */
-  def errorsReported = hasErrors
+  def errorsReported: Boolean = hasErrors
 
   private[this] var reportedFeaturesUseSites = Set[Symbol]()
 
@@ -176,26 +190,27 @@ abstract class Reporter extends interfaces.ReporterResult {
 
   def reportNewFeatureUseSite(featureTrait: Symbol): Unit = reportedFeaturesUseSites += featureTrait
 
-  val unreportedWarnings = new mutable.HashMap[String, Int] {
-    override def default(key: String) = 0
-  }
+  var unreportedWarnings: Map[String, Int] = Map.empty
 
   def report(m: MessageContainer)(implicit ctx: Context): Unit =
     if (!isHidden(m)) {
       doReport(m)(ctx.addMode(Mode.Printing))
       m match {
-        case m: ConditionalWarning if !m.enablingOption.value => unreportedWarnings(m.enablingOption.name) += 1
-        case m: Warning => warningCount += 1
+        case m: ConditionalWarning if !m.enablingOption.value =>
+          val key = m.enablingOption.name
+          unreportedWarnings =
+            unreportedWarnings.updated(key, unreportedWarnings.getOrElse(key, 0) + 1)
+        case m: Warning => _warningCount += 1
         case m: Error =>
           errors = m :: errors
-          errorCount += 1
+          _errorCount += 1
         case m: Info => // nothing to do here
         // match error if d is something else
       }
     }
 
   def incomplete(m: MessageContainer)(implicit ctx: Context): Unit =
-    incompleteHandler(m)(ctx)
+    incompleteHandler(m, ctx)
 
   /** Summary of warnings and errors */
   def summary: String = {
@@ -229,8 +244,10 @@ abstract class Reporter extends interfaces.ReporterResult {
   def isHidden(m: MessageContainer)(implicit ctx: Context): Boolean =
     ctx.mode.is(Mode.Printing)
 
-  /** Does this reporter contain not yet reported errors or warnings? */
-  def hasPendingErrors: Boolean = false
+  /** Does this reporter contain errors that have yet to be reported by its outer reporter ?
+   *  Note: this is always false when there is no outer reporter.
+   */
+  def hasUnreportedErrors: Boolean = false
 
   /** If this reporter buffers messages, remove and return all buffered messages. */
   def removeBufferedMessages(implicit ctx: Context): List[MessageContainer] = Nil

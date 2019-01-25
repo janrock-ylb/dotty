@@ -20,8 +20,8 @@ class TastyReader(val bytes: Array[Byte], start: Int, end: Int, val base: Int = 
 
   private[this] var bp: Int = start
 
-  def addr(idx: Int) = Addr(idx - base)
-  def index(addr: Addr) = addr.index + base
+  def addr(idx: Int): Addr = Addr(idx - base)
+  def index(addr: Addr): Int = addr.index + base
 
   /** The address of the first byte to read, respectively byte that was read */
   def startAddr: Addr = addr(start)
@@ -54,7 +54,7 @@ class TastyReader(val bytes: Array[Byte], start: Int, end: Int, val base: Int = 
   /** Read the next `n` bytes of `data`. */
   def readBytes(n: Int): Array[Byte] = {
     val result = new Array[Byte](n)
-    Array.copy(bytes, bp, result, 0, n)
+    System.arraycopy(bytes, bp, result, 0, n)
     bp += n
     result
   }
@@ -105,10 +105,10 @@ class TastyReader(val bytes: Array[Byte], start: Int, end: Int, val base: Int = 
   }
 
   /** Read a natural number and return as a NameRef */
-  def readNameRef() = NameRef(readNat())
+  def readNameRef(): NameRef = NameRef(readNat())
 
   /** Read a natural number and return as an address */
-  def readAddr() = Addr(readNat())
+  def readAddr(): Addr = Addr(readNat())
 
   /** Read a length number and return the absolute end address implied by it,
    *  given as <address following length field> + <length-value-read>.

@@ -1,5 +1,7 @@
 package dotty
 
+import scala.forceInline
+
 object DottyPredef {
 
   /** A class for implicit values that can serve as implicit conversions
@@ -22,18 +24,35 @@ object DottyPredef {
    */
   abstract class ImplicitConverter[-T, +U] extends Function1[T, U]
 
-  @inline final def assert(assertion: Boolean, message: => Any): Unit = {
+  @forceInline final def assert(assertion: => Boolean, message: => Any): Unit = {
     if (!assertion)
       assertFail(message)
   }
 
-  @inline final def assert(assertion: Boolean): Unit = {
+  @forceInline final def assert(assertion: => Boolean): Unit = {
     if (!assertion)
       assertFail()
   }
 
-  final def assertFail(): Unit = throw new java.lang.AssertionError("assertion failed")
-  final def assertFail(message: => Any): Unit = throw new java.lang.AssertionError("assertion failed: " + message)
+  def assertFail(): Unit = throw new java.lang.AssertionError("assertion failed")
+  def assertFail(message: => Any): Unit = throw new java.lang.AssertionError("assertion failed: " + message)
 
-  @inline final def implicitly[T](implicit ev: T): T = ev
+  @forceInline final def implicitly[T](implicit ev: T): T = ev
+
+  @forceInline def locally[T](body: => T): T = body
+
+  /**
+   * Retrieve the single value of a type with a unique inhabitant.
+   *
+   * @example {{{
+   * object Foo
+   * val foo = valueOf[Foo.type]
+   * // foo is Foo.type = Foo
+   *
+   * val bar = valueOf[23]
+   * // bar is 23.type = 23
+   * }}}
+   * @group utilities
+   */
+  @forceInline def valueOf[T](implicit vt: ValueOf[T]): T = vt.value
 }

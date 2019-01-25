@@ -6,58 +6,41 @@ package xsbt
 import xsbti.{ Logger, Severity }
 import java.net.URL
 import java.util.Optional
+import java.nio.file.{Files, Paths}
+
+import dotty.tools.dotc.core.Contexts.{ Context, ContextBase }
+import dotty.tools.dotc.reporting.Reporter
 
 class ScaladocInterface {
-  def run(args: Array[String], log: Logger, delegate: xsbti.Reporter) =
-    (new DottydocRunner(args, log, delegate)).run()
+  def run(args: Array[String], log: Logger, delegate: xsbti.Reporter) = {
+    new DottydocRunner(args, log, delegate).run()
+  }
 }
 
-class DottydocRunner(args: Array[String], log: Logger, delegate: xsbti.Reporter) {
-  def run(): Unit = delegate.log(Problem(
-    NoPosition,
-    """|The dotty sbt-bridge currently does not support doc generation directly
-       |via sbt. Please see the dotty documentation at dotty.epfl.ch""".stripMargin,
-    Severity.Error
-  ))
+class DottydocRunner(args0: Array[String], log: Logger, delegate: xsbti.Reporter) {
+  def run(): Unit = {
+    log.debug(() => args0.mkString("Calling Dottydoc with arguments  (ScaladocInterface):\n\t", "\n\t", ""))
 
-  private[this] val NoPosition = new xsbti.Position {
-    val line = Optional.empty[Integer]
-    val lineContent = ""
-    val offset = Optional.empty[Integer]
-    val sourcePath = Optional.empty[String]
-    val sourceFile = Optional.empty[java.io.File]
-    val pointer = Optional.empty[Integer]
-    val pointerSpace = Optional.empty[String]
-  }
+    val args = {
+      // When running with `-from-tasty`, remove the source files from arg list.
+      if (args0.contains("-from-tasty")) {
+        val (excluded, retained) =
+          args0.partition { arg =>
+            (arg.endsWith(".scala") || arg.endsWith(".java")) && Files.exists(Paths.get(arg))
+          }
+        log.debug(() => excluded.mkString("Running `-from-tasty`, excluding source files:\n\t", "\n\t", ""))
+        retained
+      } else args0
+    }
 
-  private def getStringSetting(name: String): Option[String] =
-    args find (_.startsWith(name)) map (_.drop(name.length))
+    val ctx = (new ContextBase).initialCtx.fresh
+      .setReporter(new DelegatingReporter(delegate))
 
-  private def getOutputFolder(args: Array[String]): Option[String] =
-    args sliding(2) find { case Array(x, _) => x == "-d" } map (_.tail.head.trim)
-
-  private def getTemplate(resources: List[URL]): Option[URL] =
-    resources.find(_.getFile.endsWith("template.html"))
-
-  private def getResources(args: Array[String]): List[URL] = {
-    val cp = args sliding (2) find { case Array(x, _) => x == "-classpath" } map (_.tail.head.trim) getOrElse ""
-
-    cp.split(":").find(_.endsWith("dottydoc-client.jar")).map { resourceJar =>
-      import java.util.jar.JarFile
-      val jarEntries = (new JarFile(resourceJar)).entries
-      var entries: List[URL] = Nil
-
-      while (jarEntries.hasMoreElements) {
-        val entry = jarEntries.nextElement()
-
-        if (!entry.isDirectory()) {
-          val path = s"jar:file:$resourceJar!/${entry.getName}"
-          val url  = new URL(path)
-          entries = url :: entries
-        }
-      }
-
-      entries
-    } getOrElse (Nil)
+    val dottydocMainClass = Class.forName("dotty.tools.dottydoc.Main")
+    val processMethod = dottydocMainClass.getMethod("process", classOf[Array[String]], classOf[Context])
+    val reporter = processMethod.invoke(null, args, ctx).asInstanceOf[Reporter]
+    if (reporter.hasErrors) {
+      throw new InterfaceCompileFailed(args, Array())
+    }
   }
 }

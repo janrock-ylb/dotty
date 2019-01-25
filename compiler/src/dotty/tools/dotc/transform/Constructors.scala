@@ -6,22 +6,18 @@ import MegaPhase._
 import dotty.tools.dotc.ast.tpd._
 import dotty.tools.dotc.core.Contexts.Context
 import dotty.tools.dotc.core.StdNames._
-import Phases._
 import ast._
 import Trees._
 import Flags._
 import SymUtils._
 import Symbols._
-import SymDenotations._
-import Types._
 import Decorators._
 import DenotTransformers._
-import util.Positions._
 import Constants.Constant
 import collection.mutable
 
 object Constructors {
-  val name = "constructors"
+  val name: String = "constructors"
 }
 
 /** This transform
@@ -34,8 +30,8 @@ class Constructors extends MiniPhase with IdentityDenotTransformer { thisPhase =
   import tpd._
 
   override def phaseName: String = Constructors.name
-  override def runsAfter = Set(HoistSuperArgs.name)
-  override def runsAfterGroupsOf = Set(Memoize.name)
+  override def runsAfter: Set[String] = Set(HoistSuperArgs.name)
+  override def runsAfterGroupsOf: Set[String] = Set(Memoize.name)
     // Memoized needs to be finished because we depend on the ownerchain after Memoize
     // when checking whether an ident is an access in a constructor or outside it.
     // This test is done in the right-hand side of a value definition. If Memoize
@@ -153,7 +149,7 @@ class Constructors extends MiniPhase with IdentityDenotTransformer { thisPhase =
         case Ident(_) | Select(This(_), _) =>
           var sym = tree.symbol
           if (sym is (ParamAccessor, butNot = Mutable)) sym = sym.subst(accessors, paramSyms)
-          if (sym.owner.isConstructor) ref(sym).withPos(tree.pos) else tree
+          if (sym.owner.isConstructor) ref(sym).withSpan(tree.span) else tree
         case Apply(fn, Nil) =>
           val fn1 = transform(fn)
           if ((fn1 ne fn) && fn1.symbol.is(Param) && fn1.symbol.owner.isPrimaryConstructor)
@@ -199,7 +195,7 @@ class Constructors extends MiniPhase with IdentityDenotTransformer { thisPhase =
             val sym = stat.symbol
             if (isRetained(sym)) {
               if (!stat.rhs.isEmpty && !isWildcardArg(stat.rhs))
-                constrStats += Assign(ref(sym), intoConstr(stat.rhs, sym)).withPos(stat.pos)
+                constrStats += Assign(ref(sym), intoConstr(stat.rhs, sym)).withSpan(stat.span)
               clsStats += cpy.ValDef(stat)(rhs = EmptyTree)
             }
             else if (!stat.rhs.isEmpty) {
@@ -228,11 +224,13 @@ class Constructors extends MiniPhase with IdentityDenotTransformer { thisPhase =
         dropped += acc
         Nil
       } else {
+        if (acc.hasAnnotation(defn.TransientParamAnnot))
+          ctx.error(em"transient parameter $acc is retained as field in class ${acc.owner}", acc.sourcePos)
         val target = if (acc.is(Method)) acc.field else acc
         if (!target.exists) Nil // this case arises when the parameter accessor is an alias
         else {
           val param = acc.subst(accessors, paramSyms)
-          val assigns = Assign(ref(target), ref(param)).withPos(tree.pos) :: Nil
+          val assigns = Assign(ref(target), ref(param)).withSpan(tree.span) :: Nil
           if (acc.name != nme.OUTER) assigns
           else {
             // insert test: if ($outer eq null) throw new NullPointerException
@@ -283,8 +281,6 @@ class Constructors extends MiniPhase with IdentityDenotTransformer { thisPhase =
       }
       else cpy.DefDef(constr)(rhs = Block(finalConstrStats, unitLiteral))
 
-    cpy.Template(tree)(
-      constr = expandedConstr,
-      body = clsStats.toList)
+    cpy.Template(tree)(constr = expandedConstr, body = clsStats.toList)
   }
 }

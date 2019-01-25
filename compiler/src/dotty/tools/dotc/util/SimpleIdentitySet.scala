@@ -16,16 +16,16 @@ abstract class SimpleIdentitySet[+Elem <: AnyRef] {
     foreach(buf += _)
     buf.toList
   }
-  def ++ [E >: Elem <: AnyRef](that: SimpleIdentitySet[E]) =
+  def ++ [E >: Elem <: AnyRef](that: SimpleIdentitySet[E]): SimpleIdentitySet[E] =
     ((this: SimpleIdentitySet[E]) /: that.toList)(_ + _)
-  def -- [E >: Elem <: AnyRef](that: SimpleIdentitySet[E]) =
+  def -- [E >: Elem <: AnyRef](that: SimpleIdentitySet[E]): SimpleIdentitySet[Elem] =
     (this /: that.toList)(_ - _)
-  override def toString = toList.mkString("(", ", ", ")")
+  override def toString: String = toList.mkString("(", ", ", ")")
 }
 
 object SimpleIdentitySet {
   object empty extends SimpleIdentitySet[Nothing] {
-    def size = 0
+    def size: Int = 0
     def + [E <: AnyRef](x: E): SimpleIdentitySet[E] =
       new Set1[E](x)
     def - [E <: AnyRef](x: E): SimpleIdentitySet[Nothing] =
@@ -81,12 +81,14 @@ object SimpleIdentitySet {
 
   private class SetN[+Elem <: AnyRef](xs: Array[AnyRef]) extends SimpleIdentitySet[Elem] {
     def size = xs.length
-    def + [E >: Elem <: AnyRef](x: E): SimpleIdentitySet[E] = {
-      val xs1 = new Array[AnyRef](size + 1)
-      Array.copy(xs, 0, xs1, 0, size)
-      xs1(size) = x
-      new SetN[E](xs1)
-    }
+    def + [E >: Elem <: AnyRef](x: E): SimpleIdentitySet[E] =
+      if (contains(x)) this
+      else {
+        val xs1 = new Array[AnyRef](size + 1)
+        System.arraycopy(xs, 0, xs1, 0, size)
+        xs1(size) = x
+        new SetN[E](xs1)
+      }
     def - [E >: Elem <: AnyRef](x: E): SimpleIdentitySet[Elem] = {
       var i = 0
       while (i < size && (xs(i) `ne` x)) i += 1
@@ -98,8 +100,8 @@ object SimpleIdentitySet {
         else new Set3(xs(0), xs(1), xs(2))
       else {
         val xs1 = new Array[AnyRef](size - 1)
-        Array.copy(xs, 0, xs1, 0, i)
-        Array.copy(xs, i + 1, xs1, i, size - (i + 1))
+        System.arraycopy(xs, 0, xs1, 0, i)
+        System.arraycopy(xs, i + 1, xs1, i, size - (i + 1))
         new SetN(xs1)
       }
     }

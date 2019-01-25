@@ -1,4 +1,5 @@
-package dotty.tools.dotc
+package dotty.tools
+package dotc
 package transform
 
 import MegaPhase._
@@ -25,10 +26,10 @@ abstract class TransformByNameApply extends MiniPhase { thisPhase: DenotTransfor
     tree.symbol.denot(ctx.withPhase(thisPhase))
 
   /** If denotation had an ExprType before, it now gets a function type */
-  protected def exprBecomesFunction(symd: SymDenotation)(implicit ctx: Context) =
+  protected def exprBecomesFunction(symd: SymDenotation)(implicit ctx: Context): Boolean =
     (symd is Param) || (symd is (ParamAccessor, butNot = Method))
 
-  protected def isByNameRef(tree: Tree)(implicit ctx: Context) = {
+  protected def isByNameRef(tree: Tree)(implicit ctx: Context): Boolean = {
     val origDenot = originalDenotation(tree)
     origDenot.info.isInstanceOf[ExprType] && exprBecomesFunction(origDenot)
   }
@@ -42,7 +43,8 @@ abstract class TransformByNameApply extends MiniPhase { thisPhase: DenotTransfor
       case formalExpr: ExprType =>
         var argType = arg.tpe.widenIfUnstable
         if (defn.isBottomType(argType)) argType = formal.widenExpr
-        def wrap(arg: Tree) = ref(defn.cbnArg).appliedToType(argType).appliedTo(arg)
+        def wrap(arg: Tree) =
+          ref(defn.cbnArg).appliedToType(argType).appliedTo(arg).withSpan(arg.span)
         arg match {
           case Apply(Select(qual, nme.apply), Nil)
           if qual.tpe.derivesFrom(defn.FunctionClass(0)) && isPureExpr(qual) =>

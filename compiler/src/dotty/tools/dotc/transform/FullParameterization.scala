@@ -52,7 +52,6 @@ import ast.Trees._
 trait FullParameterization {
 
   import tpd._
-  import FullParameterization._
 
   /** If references to original symbol `referenced` from within fully parameterized method
    *  `derived` should be rewired to some fully parameterized method, the rewiring target symbol,
@@ -241,7 +240,7 @@ trait FullParameterization {
             ref(vparam.symbol).ensureConforms(paramType)
           }))
       })
-    }).withPos(originalDef.rhs.pos)
+    }).withSpan(originalDef.rhs.span)
   }
 }
 

@@ -4,7 +4,6 @@ package transform
 import ast.tpd
 import core.Contexts.Context
 import core.StdNames.nme
-import core.Phases.Phase
 import TypeUtils._
 import MegaPhase.MiniPhase
 
@@ -21,13 +20,13 @@ class GetClass extends MiniPhase {
   override def phaseName: String = "getClass"
 
   // getClass transformation should be applied to specialized methods
-  override def runsAfter = Set(Erasure.name, FunctionalInterfaces.name)
+  override def runsAfter: Set[String] = Set(Erasure.name)
 
   override def transformApply(tree: Apply)(implicit ctx: Context): Tree = {
     import ast.Trees._
     tree match {
       case Apply(Select(qual, nme.getClass_), Nil) if qual.tpe.widen.isPrimitiveValueType =>
-        clsOf(qual.tpe.widen).withPos(tree.pos)
+        clsOf(qual.tpe.widen).withSpan(tree.span)
       case _ => tree
     }
   }

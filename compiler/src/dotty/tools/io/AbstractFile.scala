@@ -10,7 +10,7 @@ import java.io.{
   ByteArrayOutputStream
 }
 import java.net.URL
-import java.nio.file.{FileAlreadyExistsException, Files, Paths}
+import java.nio.file.{Files, Paths}
 
 /**
  * An abstraction over files for use in the reflection/compiler libraries.
@@ -89,11 +89,14 @@ abstract class AbstractFile extends Iterable[AbstractFile] {
   /** Returns the path of this abstract file. */
   def path: String
 
+  /** Returns the absolute path of this abstract file. */
+  def absolutePath: String = path
+
   /** Returns the path of this abstract file in a canonical form. */
   def canonicalPath: String = if (jpath == null) path else jpath.normalize.toString
 
   /** Checks extension case insensitively. */
-  def hasExtension(other: String) = extension == other.toLowerCase
+  def hasExtension(other: String): Boolean = extension == other.toLowerCase
   val extension: String = Path.extension(name)
 
   /** The absolute file, if this is a relative file. */
@@ -122,7 +125,7 @@ abstract class AbstractFile extends Iterable[AbstractFile] {
   }
 
   /** Does this abstract file represent something which can contain classfiles? */
-  def isClassContainer = isDirectory || (jpath != null && (extension == "jar" || extension == "zip"))
+  def isClassContainer: Boolean = isDirectory || (jpath != null && (extension == "jar" || extension == "zip"))
 
   /** Create a file on disk, if one does not exist already. */
   def create(): Unit
@@ -158,7 +161,7 @@ abstract class AbstractFile extends Iterable[AbstractFile] {
    *  encoding when converting to the char array.
    */
   @throws(classOf[IOException])
-  def toCharArray = new String(toByteArray).toCharArray
+  def toCharArray: Array[Char] = new String(toByteArray).toCharArray
 
   /** Returns contents of file (if applicable) in a byte array.
    */
@@ -266,6 +269,6 @@ abstract class AbstractFile extends Iterable[AbstractFile] {
   protected def unsupported(msg: String): Nothing = throw new UnsupportedOperationException(msg)
 
   /** Returns the path of this abstract file. */
-  override def toString() = path
+  override def toString(): String = path
 
 }

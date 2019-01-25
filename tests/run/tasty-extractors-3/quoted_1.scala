@@ -1,20 +1,17 @@
 import scala.quoted._
-import dotty.tools.dotc.quoted.Toolbox._
 
-import scala.tasty.TopLevelSplice
-import scala.tasty.Tasty
-import scala.tasty.util.TreeTraverser
+import scala.tasty.Reflection
 
 object Macros {
 
   implicit inline def printTypes[T](x: => T): Unit =
-    ~impl('(x))(TopLevelSplice.tastyContext) // FIXME infer TopLevelSplice.tastyContext within top level ~
+    ~impl('(x))
 
-  def impl[T](x: Expr[T])(implicit tasty: Tasty): Expr[Unit] = {
-    import tasty._
+  def impl[T](x: Expr[T])(implicit reflect: Reflection): Expr[Unit] = {
+    import reflect._
 
     val buff = new StringBuilder
-    val traverser = new TreeTraverser(tasty) {
+    val traverser = new TreeTraverser {
       override def traverseTypeTree(tree: TypeOrBoundsTree)(implicit ctx: Context): Unit = {
         buff.append(tree.tpe.show)
         buff.append("\n\n")
@@ -22,7 +19,7 @@ object Macros {
       }
     }
 
-    val tree = x.toTasty
+    val tree = x.unseal
     traverser.traverseTree(tree)
     '(print(~buff.result().toExpr))
   }

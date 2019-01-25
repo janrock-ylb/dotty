@@ -2,18 +2,18 @@ package dotty.tools
 package dotc
 package parsing
 
-import core.Names._, core.Contexts._, core.Decorators._, util.Positions._
+import core.Names._, core.Contexts._, core.Decorators._, util.Spans._
 import core.StdNames._, core.Comments._
 import util.SourceFile
 import java.lang.Character.isDigit
-import util.Chars._
+import scala.tasty.util.Chars._
 import util.NameTransformer.avoidIllegalChars
+import util.Spans.Span
 import Tokens._
 import scala.annotation.{ switch, tailrec }
 import scala.collection.mutable
-import scala.collection.immutable.SortedMap
-import mutable.ListBuffer
-import rewrite.Rewrites.patch
+import scala.collection.immutable.{SortedMap, BitSet}
+import rewrites.Rewrites.patch
 
 object Scanners {
 
@@ -45,7 +45,7 @@ object Scanners {
     /** the base of a number */
     var base: Int = 0
 
-    def copyFrom(td: TokenData) = {
+    def copyFrom(td: TokenData): Unit = {
       this.token = td.token
       this.offset = td.offset
       this.lastOffset = td.lastOffset
@@ -56,7 +56,8 @@ object Scanners {
   }
 
   abstract class ScannerCommon(source: SourceFile)(implicit ctx: Context) extends CharArrayReader with TokenData {
-    val buf = source.content
+    val buf: Array[Char] = source.content
+    def nextToken(): Unit
 
     // Errors -----------------------------------------------------------------
 
@@ -65,15 +66,15 @@ object Scanners {
     var errOffset: Offset = NoOffset
 
     /** Generate an error at the given offset */
-    def error(msg: String, off: Offset = offset) = {
-      ctx.error(msg, source atPos Position(off))
+    def error(msg: String, off: Offset = offset): Unit = {
+      ctx.error(msg, source atSpan Span(off))
       token = ERROR
       errOffset = off
     }
 
     /** signal an error where the input ended in the middle of a token */
     def incompleteInputError(msg: String): Unit = {
-      ctx.incompleteInputError(msg, source atPos Position(offset))
+      ctx.incompleteInputError(msg, source atSpan Span(offset))
       token = EOF
       errOffset = offset
     }
@@ -82,7 +83,7 @@ object Scanners {
 
     /** A character buffer for literals
       */
-    val litBuf = new StringBuilder
+    protected val litBuf = new mutable.StringBuilder
 
     /** append Unicode character to "litBuf" buffer
       */
@@ -108,7 +109,7 @@ object Scanners {
     def toToken(idx: Int): Token
 
     /** Clear buffer and set string */
-    def setStrVal() =
+    def setStrVal(): Unit =
       strVal = flushBuf(litBuf)
 
     /** Convert current strVal to char value
@@ -172,10 +173,16 @@ object Scanners {
   }
 
   class Scanner(source: SourceFile, override val startFrom: Offset = 0)(implicit ctx: Context) extends ScannerCommon(source)(ctx) {
-    val keepComments = ctx.settings.YkeepComments.value
+    val keepComments: Boolean = !ctx.settings.YdropComments.value
 
     /** All doc comments kept by their end position in a `Map` */
     private[this] var docstringMap: SortedMap[Int, Comment] = SortedMap.empty
+
+    /* A Buffer for comment positions */
+    private[this] val commentPosBuf = new mutable.ListBuffer[Span]
+
+    /** Return a list of all the comment positions */
+    def commentSpans: List[Span] = commentPosBuf.toList
 
     private[this] def addComment(comment: Comment): Unit = {
       val lookahead = lookaheadReader()
@@ -194,18 +201,19 @@ object Scanners {
     def getDocComment(pos: Int): Option[Comment] = docstringMap.get(pos)
 
     /** A buffer for comments */
-    val commentBuf = new StringBuilder
+    private[this] val commentBuf = new mutable.StringBuilder
 
     private def handleMigration(keyword: Token): Token =
       if (!isScala2Mode) keyword
-      else if (keyword == INLINE) treatAsIdent()
+      else if (  keyword == ENUM
+              || keyword == ERASED) treatAsIdent()
       else keyword
 
 
     private def treatAsIdent() = {
       testScala2Mode(i"$name is now a keyword, write `$name` instead of $name to keep it as an identifier")
-      patch(source, Position(offset), "`")
-      patch(source, Position(offset + name.length), "`")
+      patch(source, Span(offset), "`")
+      patch(source, Span(offset + name.length), "`")
       IDENTIFIER
     }
 
@@ -235,13 +243,18 @@ object Scanners {
 
 // Scala 2 compatibility
 
-    val isScala2Mode = ctx.settings.language.value.contains(nme.Scala2.toString)
+    val isScala2Mode: Boolean = ctx.scala2Setting
 
     /** Cannot use ctx.featureEnabled because accessing the context would force too much */
-    def testScala2Mode(msg: String, pos: Position = Position(offset)) = {
-      if (isScala2Mode) ctx.migrationWarning(msg, source atPos pos)
+    def testScala2Mode(msg: String, span: Span = Span(offset)): Boolean = {
+      if (isScala2Mode) ctx.migrationWarning(msg, source.atSpan(span))
       isScala2Mode
     }
+
+    /** A migration warning if in Scala-2 mode, an error otherwise */
+    def errorOrMigrationWarning(msg: String, span: Span = Span(offset)): Unit =
+      if (isScala2Mode) ctx.migrationWarning(msg, source.atSpan(span))
+      else ctx.error(msg, source.atSpan(span))
 
 // Get next token ------------------------------------------------------------
 
@@ -294,9 +307,6 @@ object Scanners {
       case _ =>
     }
 
-    /** A new Scanner that starts at the current token offset */
-    def lookaheadScanner = new Scanner(source, offset)
-
     /** Produce next token, filling TokenData fields of Scanner.
      */
     def nextToken(): Unit = {
@@ -335,7 +345,7 @@ object Scanners {
       // print("[" + this +"]")
     }
 
-    def postProcessToken() = {
+    def postProcessToken(): Unit = {
       // Join CASE + CLASS => CASECLASS, CASE + OBJECT => CASEOBJECT, SEMI + ELSE => ELSE
       def lookahead() = {
         prev copyFrom this
@@ -613,8 +623,9 @@ object Scanners {
       val start = lastCharOffset
       def finishComment(): Boolean = {
         if (keepComments) {
-          val pos = Position(start, charOffset - 1, start)
+          val pos = Span(start, charOffset - 1, start)
           val comment = Comment(pos, flushBuf(commentBuf))
+          commentPosBuf += pos
 
           if (comment.isDocComment) {
             addComment(comment)
@@ -626,8 +637,34 @@ object Scanners {
       nextChar()
       if (ch == '/') { skipLine(); finishComment() }
       else if (ch == '*') { nextChar(); skipComment(); finishComment() }
-      else false
+      else {
+        // This was not a comment, remove the `/` from the buffer
+        commentBuf.clear()
+        false
+      }
     }
+
+// Lookahead ---------------------------------------------------------------
+
+  /** A new Scanner that starts at the current token offset */
+  def lookaheadScanner: Scanner = new Scanner(source, offset)
+
+  /** Is the token following the current one in `tokens`? */
+  def lookaheadIn(tokens: BitSet): Boolean = {
+    val lookahead = lookaheadScanner
+    do lookahead.nextToken()
+    while (lookahead.token == NEWLINE || lookahead.token == NEWLINES)
+    tokens.contains(lookahead.token)
+  }
+
+  /** Is the current token in a position where a modifier is allowed? */
+  def inModifierPosition(): Boolean = {
+    val lookahead = lookaheadScanner
+    do lookahead.nextToken()
+    while (lookahead.token == NEWLINE || lookahead.token == NEWLINES ||
+           lookahead.isSoftModifier)
+    modifierFollowers.contains(lookahead.token)
+  }
 
 // Identifiers ---------------------------------------------------------------
 
@@ -709,6 +746,14 @@ object Scanners {
       }
     }
 
+    def isSoftModifier: Boolean =
+      token == IDENTIFIER && softModifierNames.contains(name)
+
+    def isSoftModifierInModifierPosition: Boolean =
+      isSoftModifier && inModifierPosition()
+
+    def isSoftModifierInParamModifierPosition: Boolean =
+      isSoftModifier && !lookaheadIn(BitSet(COLON))
 
 // Literals -----------------------------------------------------------------
 
@@ -961,7 +1006,7 @@ object Scanners {
       case '[' => QBRACKET
     }
 
-    override def toString =
+    override def toString: String =
       showTokenDetailed(token) + {
         if ((identifierTokens contains token) || (literalTokens contains token)) " " + name
         else ""
@@ -987,7 +1032,7 @@ object Scanners {
 // (does not seem to be needed) def flush = { charOffset = offset; nextChar(); this }
 
     /* Resume normal scanning after XML */
-    def resume(lastToken: Token) = {
+    def resume(lastToken: Token): Unit = {
       token = lastToken
       if (next.token != EMPTY && !ctx.reporter.hasErrors)
         error("unexpected end of input: possible missing '}' in XML block")
@@ -1002,5 +1047,5 @@ object Scanners {
 
   // ------------- keyword configuration -----------------------------------
 
-  val (lastKeywordStart, kwArray) = buildKeywordArray(keywords)
+  private val (lastKeywordStart, kwArray) = buildKeywordArray(keywords)
 }

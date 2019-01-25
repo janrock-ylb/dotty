@@ -1,78 +1,127 @@
-package dotty.tools
-package repl
+package dotty.tools.repl
 
 import org.junit.Assert._
 import org.junit.Test
-
-import dotc.reporting.MessageRendering
-import dotc.ast.untpd
-
-import results._
-import ReplTest._
 
 /** These tests test input that has proved problematic */
 class TabcompleteTests extends ReplTest {
 
   /** Returns the `(<instance completions>, <companion completions>)`*/
-  private[this] def tabComplete(src: String)(implicit state: State): Completions =
-    completions(src.length, src, state)
+  private[this] def tabComplete(src: String)(implicit state: State): List[String] =
+    completions(src.length, src, state).map(_.value).sorted
 
-  @Test def tabCompleteList: Unit = fromInitialState { implicit s =>
+  @Test def tabCompleteList = fromInitialState { implicit s =>
     val comp = tabComplete("List.r")
-    assertTrue(s"""Expected single element "range" got: ${comp.suggestions}""",
-      comp.suggestions.head == "range")
+    assertEquals(List("range"), comp.distinct)
   }
 
-  @Test def tabCompleteListInstance: Unit = fromInitialState { implicit s =>
+  @Test def tabCompleteListInstance = fromInitialState { implicit s =>
     val comp = tabComplete("(null: List[Int]).sli")
-    assertTrue(s"""Expected completions "slice" and "sliding": ${comp.suggestions}""",
-      comp.suggestions.sorted == List("slice", "sliding"))
+    assertEquals(List("slice", "sliding"), comp.distinct)
   }
 
-  @Test def tabCompleteModule: Unit =
-    fromInitialState{ implicit s =>
-      val comp = tabComplete("scala.Pred")
-      assertEquals(comp.suggestions,List("Predef"))
-    }
+  @Test def tabCompleteModule = fromInitialState{ implicit s =>
+    val comp = tabComplete("scala.Pred")
+    assertEquals(List("Predef"), comp)
+  }
 
-  @Test def autoCompleteValAssign: Unit =
-    fromInitialState { implicit s => tabComplete("val x = 5") }
+  @Test def tabCompleteInClass = fromInitialState { implicit s =>
+    val comp = tabComplete("class Foo { def bar: List[Int] = List.ap")
+    assertEquals(List("apply"), comp)
+  }
 
-  @Test def tabCompleteNumberDot: Unit =
-    fromInitialState { implicit s => tabComplete("val x = 5 + 5.") }
-
-  @Test def tabCompleteInClass: Unit =
-    fromInitialState { implicit s =>
-      tabComplete("class Foo { def bar: List[Int] = List.a")
-    }
-
-  @Test def tabCompleteTwiceIn: Unit = {
-    val src1 = "class Foo { def bar: List[Int] = List.a"
-    val src2 = "class Foo { def bar: List[Int] = List.app"
+  @Test def tabCompleteTwiceIn = {
+    val src1 = "class Foo { def bar(xs: List[Int]) = xs.map"
+    val src2 = "class Foo { def bar(xs: List[Int]) = xs.mapC"
 
     fromInitialState { implicit state =>
-      assert(tabComplete(src1).suggestions.nonEmpty)
+      val comp = tabComplete(src1)
+      assertEquals(List("map", "mapConserve"), comp)
       state
     }
     .andThen { implicit state =>
-      assert(tabComplete(src2).suggestions.nonEmpty)
+      val comp = tabComplete(src2)
+      assertEquals(List("mapConserve"), comp)
     }
   }
 
-  @Test def i3309: Unit =
-    fromInitialState { implicit s =>
-      // TODO: add back '.', once #4397 is fixed
-      List("\"", ")", "'", "¨", "£", ":", ",", ";", "@", "}", "[", "]")
-        .foreach(src => assertTrue(tabComplete(src).suggestions.isEmpty))
-    }
+  @Test def i3309 = fromInitialState { implicit s =>
+    // We make sure we do not crash
+    List("\"", ")", "'", "¨", "£", ":", ",", ";", "@", "}", "[", "]", ".")
+      .foreach(tabComplete(_))
+  }
 
-  @Test def sortedCompletions: Unit =
+  @Test def completeFromPreviousState =
     fromInitialState { implicit state  =>
       val src = "class Foo { def comp3 = 3; def comp1 = 1; def comp2 = 2 }"
-      compiler.compile(src).stateOrFail
+      run(src)
     }
     .andThen { implicit state =>
       val expected = List("comp1", "comp2", "comp3")
-      assertEquals(expected, tabComplete("(new Foo).comp").suggestions)
+      assertEquals(expected, tabComplete("(new Foo).comp"))
     }
+
+  @Test def completeFromPreviousState2 =
+    fromInitialState { implicit state  =>
+      val src = "def hello = 1"
+      run(src)
+    }
+    .andThen { implicit state =>
+      val expected = List("hello")
+      assertEquals(expected, tabComplete("hel"))
+    }
+
+  @Test def tabCompleteFromPreviousImport =
+    fromInitialState { implicit state =>
+      val src = "import java.io.FileDescriptor"
+      run(src)
+    }
+    .andThen { implicit state =>
+      val expected = List("FileDescriptor")
+      assertEquals(expected, tabComplete("val foo: FileDesc"))
+    }
+
+  @Test def tabCompleteRenamedImport =
+    fromInitialState { implicit state =>
+      val src = "import java.io.{FileDescriptor => Renamed}"
+      run(src)
+    }
+    .andThen { implicit state =>
+      val expected = List("Renamed")
+      assertEquals(expected, tabComplete("val foo: Rena"))
+    }
+
+  @Test def tabClosureComplete = fromInitialState { implicit s =>
+    assertEquals(List("map", "mapConserve"), tabComplete("Nil.map"))
+    assertEquals(List("map", "mapConserve"), tabComplete("(x: Int => Int) => Nil.map"))
+    assertEquals(List("apply"), tabComplete("(x: Int => Int) => x.ap"))
+  }
+
+  @Test def importScala = fromInitialState { implicit s =>
+    val comp = tabComplete("import scala.")
+    // check that there are no special symbols leaked: <byname>, <special-ops>, ...
+    assertEquals(comp.find(_.startsWith("<")), None)
+    assert(!comp.contains("package"))
+  }
+
+  @Test def `null` = fromInitialState { implicit s =>
+    val comp = tabComplete("null.")
+    assertEquals(
+      List("!=", "##", "==", "asInstanceOf", "clone", "eq", "equals", "finalize", "getClass", "hashCode",
+          "isInstanceOf", "ne", "notify", "notifyAll", "synchronized", "toString", "wait"),
+      comp.distinct.sorted)
+  }
+
+  @Test def anyRef = fromInitialState { implicit s =>
+    val comp = tabComplete("(null: AnyRef).")
+    assertEquals(
+      List("!=", "##", "+", "->", "==", "asInstanceOf", "clone", "ensuring", "eq", "equals", "finalize", "formatted",
+          "getClass", "hashCode", "isInstanceOf", "ne", "notify", "notifyAll", "synchronized", "toString", "wait", "→"),
+      comp.distinct.sorted)
+  }
+
+  @Test def `???` = fromInitialState { implicit s =>
+    val comp = tabComplete("???.")
+    assertEquals(Nil, comp)
+  }
 }

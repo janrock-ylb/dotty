@@ -5,6 +5,8 @@
  */
 package dotty.tools.dotc.util
 
+import scala.collection.mutable
+
 /** The comment parsing in `dotc` is used by both the comment cooking and the
   * dottydoc tool.
   *
@@ -13,7 +15,7 @@ package dotty.tools.dotc.util
   * handled by dottydoc.
   */
 object CommentParsing {
-  import Chars._
+  import scala.tasty.util.Chars._
 
   /** Returns index of string `str` following `start` skipping longest
    *  sequence of whitespace characters characters (but no newlines)
@@ -130,7 +132,7 @@ object CommentParsing {
   /** The first start tag of a list of tag intervals,
    *  or the end of the whole comment string - 2 if list is empty
    */
-  def startTag(str: String, sections: List[(Int, Int)]) = sections match {
+  def startTag(str: String, sections: List[(Int, Int)]): Int = sections match {
     case Nil             => str.length - 2
     case (start, _) :: _ => start
   }
@@ -216,13 +218,22 @@ object CommentParsing {
   }
 
   /** Cleanup section text */
-  def cleanupSectionText(str: String) = {
+  def cleanupSectionText(str: String): String = {
     var result = str.trim.replaceAll("\n\\s+\\*\\s+", " \n")
     while (result.endsWith("\n"))
       result = result.substring(0, str.length - 1)
     result
   }
 
+  /** A map from tag name to all boundaries for this tag */
+  def groupedSections(str: String, sections: List[(Int, Int)]): Map[String, List[(Int, Int)]] = {
+    val map = mutable.Map.empty[String, List[(Int, Int)]].withDefaultValue(Nil)
+    sections.reverse.foreach { bounds =>
+      val tag = extractSectionTag(str, bounds)
+      map.update(tag, (skipTag(str, bounds._1), bounds._2) :: map(tag))
+    }
+    map.toMap
+  }
 
   def removeSections(raw: String, xs: String*): String = {
     val sections = tagIndex(raw)

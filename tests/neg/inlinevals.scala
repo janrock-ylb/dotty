@@ -1,6 +1,8 @@
 object Test {
 
-  def power(x: Double, inline n: Int): Double = ???
+  def power0(x: Double, inline n: Int): Double = ???  // error
+
+  inline def power(x: Double, inline n: Int): Double = ???  // ok
 
   inline val N = 10
   def X = 20
@@ -19,12 +21,15 @@ object Test {
 
   inline val xs = List(1, 2, 3) // error: must be a constant expression
 
-  def f(inline xs: List[Int]) = xs
+  inline def foo(x: Int) = {
 
-  f(List(1, 2, 3)) // error: must be a constant expression
+    def f(inline xs: List[Int]) = xs // error
 
-  def byname(inline f: => String): Int = ??? // ok
+    inline val y = { println("hi"); 1 }  // ok
+    inline val z = x // ok
 
-  byname("hello" ++ " world")
+  }
+
+  inline def byname(inline f: => String): Int = ??? // ok
 
 }

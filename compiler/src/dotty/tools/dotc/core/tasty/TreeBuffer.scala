@@ -4,7 +4,7 @@ package core
 package tasty
 
 import util.Util.{bestFit, dble}
-import TastyBuffer.{Addr, AddrWidth}
+import TastyBuffer.{Addr, NoAddr, AddrWidth}
 import config.Printers.pickling
 import ast.untpd.Tree
 
@@ -25,9 +25,9 @@ class TreeBuffer extends TastyBuffer(50000) {
     case addr: Addr => addr
   }
 
-  def addrOfTree(tree: Tree): Option[Addr] = treeAddrs.get(tree) match {
-    case null => None
-    case addr: Addr => Some(addr)
+  def addrOfTree(tree: Tree): Addr = treeAddrs.get(tree) match {
+    case null => NoAddr
+    case addr: Addr => addr
   }
 
   private def offset(i: Int): Addr = Addr(offsets(i))
@@ -51,13 +51,13 @@ class TreeBuffer extends TastyBuffer(50000) {
   }
 
   /** Write reference right adjusted into freshly reserved field. */
-  def writeRef(target: Addr) = {
+  def writeRef(target: Addr): Unit = {
     keepOffset(relative = false)
     fillAddr(reserveAddr(), target)
   }
 
   /** Fill previously reserved field with a reference */
-  def fillRef(at: Addr, target: Addr, relative: Boolean) = {
+  def fillRef(at: Addr, target: Addr, relative: Boolean): Unit = {
     val addr = if (relative) target.relativeTo(at) else target
     fillAddr(at, addr)
   }
@@ -137,7 +137,7 @@ class TreeBuffer extends TastyBuffer(50000) {
     var i = 0
     var wasted = 0
     def shift(end: Int) =
-      Array.copy(bytes, start, bytes, start - lastDelta, end - start)
+      System.arraycopy(bytes, start, bytes, start - lastDelta, end - start)
     while (i < numOffsets) {
       val next = offsets(i)
       shift(next)

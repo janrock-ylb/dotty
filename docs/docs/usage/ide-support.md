@@ -34,6 +34,8 @@ Status
 - Type information on hover
 - Go to definition (in the current project)
 - Find all references
+- Documentation on hover
+- [Worksheet mode](worksheet-mode.html)
 
 ## Partially working features:
 - Completion
@@ -41,7 +43,6 @@ Status
 - Go to definition in external projects
 
 ## Unimplemented features:
-- Documentation on hover
 - Formatting code (requires integrating with scalafmt)
 - Quick fixes (probably by integrating with scalafix)
 
@@ -51,7 +52,7 @@ Status
 - Once the IDE is started, source files that are not opened in the IDE
   should not be modified in some other editor, the IDE won't pick up
   these changes.
-- Not all compiler errors/warnings are displayed, just those occuring
+- Not all compiler errors/warnings are displayed, just those occurring
   during typechecking.
 
 

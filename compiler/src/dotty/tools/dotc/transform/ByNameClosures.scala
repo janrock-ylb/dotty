@@ -2,12 +2,9 @@ package dotty.tools.dotc
 package transform
 
 import core._
-import Symbols._
-import SymDenotations._
 import Contexts._
 import Types._
 import Flags._
-import Decorators._
 import DenotTransformers.IdentityDenotTransformer
 import core.StdNames.nme
 
@@ -31,10 +28,10 @@ class ByNameClosures extends TransformByNameApply with IdentityDenotTransformer 
   override def mkByNameClosure(arg: Tree, argType: Type)(implicit ctx: Context): Tree = {
     val meth = ctx.newSymbol(
       ctx.owner, nme.ANON_FUN, Synthetic | Method, MethodType(Nil, Nil, argType))
-    Closure(meth, _ => arg.changeOwnerAfter(ctx.owner, meth, thisPhase))
+    Closure(meth, _ => arg.changeOwnerAfter(ctx.owner, meth, thisPhase)).withSpan(arg.span)
   }
 }
 
 object ByNameClosures {
-  val name = "byNameClosures"
+  val name: String = "byNameClosures"
 }

@@ -49,6 +49,14 @@ class ExtractDependencies extends Phase {
 
   override def phaseName: String = "sbt-deps"
 
+  override def isRunnable(implicit ctx: Context): Boolean = {
+    def forceRun = ctx.settings.YdumpSbtInc.value || ctx.settings.YforceSbtPhases.value
+    super.isRunnable && (ctx.sbtCallback != null || forceRun)
+  }
+
+  // Check no needed. Does not transform trees
+  override def isCheckable: Boolean = false
+
   // This phase should be run directly after `Frontend`, if it is run after
   // `PostTyper`, some dependencies will be lost because trees get simplified.
   // See the scripted test `constants` for an example where this matters.
@@ -56,45 +64,39 @@ class ExtractDependencies extends Phase {
 
   override def run(implicit ctx: Context): Unit = {
     val unit = ctx.compilationUnit
-    val dumpInc = ctx.settings.YdumpSbtInc.value
-    val forceRun = dumpInc || ctx.settings.YforceSbtPhases.value
-    val shouldRun = !unit.isJava && (ctx.sbtCallback != null || forceRun)
+    val collector = new ExtractDependenciesCollector
+    collector.traverse(unit.tpdTree)
 
-    if (shouldRun) {
-      val collector = new ExtractDependenciesCollector
-      collector.traverse(unit.tpdTree)
+    if (ctx.settings.YdumpSbtInc.value) {
+      val deps = collector.dependencies.map(_.toString).toArray[Object]
+      val names = collector.usedNames.map { case (clazz, names) => s"$clazz: $names" }.toArray[Object]
+      Arrays.sort(deps)
+      Arrays.sort(names)
 
-      if (dumpInc) {
-        val deps = collector.dependencies.map(_.toString).toArray[Object]
-        val names = collector.usedNames.map { case (clazz, names) => s"$clazz: $names" }.toArray[Object]
-        Arrays.sort(deps)
-        Arrays.sort(names)
+      val pw = io.File(unit.source.file.jpath).changeExtension("inc").toFile.printWriter()
+      // val pw = Console.out
+      try {
+        pw.println("Used Names:")
+        pw.println("===========")
+        names.foreach(pw.println)
+        pw.println()
+        pw.println("Dependencies:")
+        pw.println("=============")
+        deps.foreach(pw.println)
+      } finally pw.close()
+    }
 
-        val pw = io.File(unit.source.file.jpath).changeExtension("inc").toFile.printWriter()
-        // val pw = Console.out
-        try {
-          pw.println("Used Names:")
-          pw.println("===========")
-          names.foreach(pw.println)
-          pw.println()
-          pw.println("Dependencies:")
-          pw.println("=============")
-          deps.foreach(pw.println)
-        } finally pw.close()
+    if (ctx.sbtCallback != null) {
+      collector.usedNames.foreach {
+        case (clazz, usedNames) =>
+          val className = classNameAsString(clazz)
+          usedNames.names.foreach {
+            case (usedName, scopes) =>
+              ctx.sbtCallback.usedName(className, usedName.toString, scopes)
+          }
       }
 
-      if (ctx.sbtCallback != null) {
-        collector.usedNames.foreach {
-          case (clazz, usedNames) =>
-            val className = classNameAsString(clazz)
-            usedNames.names.foreach {
-              case (usedName, scopes) =>
-                ctx.sbtCallback.usedName(className, usedName.toString, scopes)
-            }
-        }
-
-        collector.dependencies.foreach(recordDependency)
-      }
+      collector.dependencies.foreach(recordDependency)
     }
   }
 
@@ -127,7 +129,14 @@ class ExtractDependencies extends Phase {
           // We can recover the fully qualified name of a classfile from
           // its path
           val classSegments = pf.givenPath.segments.takeRight(packages + 1)
-          binaryDependency(pf.file, binaryClassName(classSegments))
+          // FIXME: pf.file is null for classfiles coming from the modulepath
+          // (handled by JrtClassPath) because they cannot be represented as
+          // java.io.File, since the `binaryDependency` callback must take a
+          // java.io.File, this means that we cannot record dependencies coming
+          // from the modulepath. For now this isn't a big deal since we only
+          // support having the standard Java library on the modulepath.
+          if (pf.file != null)
+            binaryDependency(pf.file, binaryClassName(classSegments))
 
         case _ =>
           ctx.warning(s"sbt-deps: Ignoring dependency $depFile of class ${depFile.getClass}}")
@@ -229,7 +238,7 @@ private class ExtractDependenciesCollector extends tpd.TreeTraverser { thisTreeT
           ctx.warning("""|No class, trait or object is defined in the compilation unit.
                          |The incremental compiler cannot record the dependency information in such case.
                          |Some errors like unused import referring to a non-existent class might not be reported.
-                         |""".stripMargin, tree.pos)
+                         |""".stripMargin, tree.sourcePos)
     }
     _responsibleForImports
   }
@@ -358,7 +367,7 @@ private class ExtractDependenciesCollector extends tpd.TreeTraverser { thisTreeT
     }
 
     tree match {
-      case Inlined(call, _, _) =>
+      case Inlined(call, _, _) if !call.isEmpty =>
         // The inlined call is normally ignored by TreeTraverser but we need to
         // record it as a dependency
         traverse(call)
@@ -434,14 +443,14 @@ private class ExtractDependenciesCollector extends tpd.TreeTraverser { thisTreeT
     }
   }
 
-  def addTypeDependency(tpe: Type)(implicit ctx: Context) = {
+  def addTypeDependency(tpe: Type)(implicit ctx: Context): Unit = {
     val traverser = new TypeDependencyTraverser {
       def addDependency(symbol: Symbol) = addMemberRefDependency(symbol)
     }
     traverser.traverse(tpe)
   }
 
-  def addPatMatDependency(tpe: Type)(implicit ctx: Context) = {
+  def addPatMatDependency(tpe: Type)(implicit ctx: Context): Unit = {
     val traverser = new TypeDependencyTraverser {
       def addDependency(symbol: Symbol) =
         if (!ignoreDependency(symbol) && symbol.is(Sealed)) {

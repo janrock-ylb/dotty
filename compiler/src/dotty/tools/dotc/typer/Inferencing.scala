@@ -4,23 +4,19 @@ package typer
 
 import core._
 import ast._
-import Contexts._, Types._, Flags._, Denotations._, Names._, StdNames._, NameOps._, Symbols._
+import Contexts._, Types._, Flags._, Symbols._
 import Trees._
-import Constants._
-import Scopes._
 import ProtoTypes._
 import NameKinds.UniqueName
-import annotation.unchecked
-import util.Positions._
+import util.Spans._
 import util.{Stats, SimpleIdentityMap}
-import util.common._
 import Decorators._
-import Uniques._
-import config.Printers.{typr, constr}
+import config.Printers.{gadts, typr}
 import annotation.tailrec
 import reporting._
 import collection.mutable
-import config.Config
+
+import scala.annotation.internal.sharable
 
 object Inferencing {
 
@@ -42,9 +38,9 @@ object Inferencing {
   /** The fully defined type, where all type variables are forced.
    *  Throws an error if type contains wildcards.
    */
-  def fullyDefinedType(tp: Type, what: String, pos: Position)(implicit ctx: Context) =
+  def fullyDefinedType(tp: Type, what: String, span: Span)(implicit ctx: Context): Type =
     if (isFullyDefined(tp, ForceDegree.all)) tp
-    else throw new Error(i"internal error: type of $what $tp is not fully defined, pos = $pos") // !!! DEBUG
+    else throw new Error(i"internal error: type of $what $tp is not fully defined, pos = $span") // !!! DEBUG
 
 
   /** Instantiate selected type variables `tvars` in type `tp` */
@@ -113,7 +109,7 @@ object Inferencing {
             val minimize =
               force.minimizeAll ||
               variance >= 0 && !(
-                force == ForceDegree.noBottom &&
+                !force.allowBottom &&
                 defn.isBottomType(ctx.typeComparer.approximation(tvar.origin, fromBelow = true)))
             if (minimize) instantiate(tvar, fromBelow = true)
             else toMaximize = true
@@ -148,7 +144,7 @@ object Inferencing {
       val (tl1, tvars) = constrained(tl, tree)
       var tree1 = AppliedTypeTree(tree.withType(tl1), tvars)
       tree1.tpe <:< pt
-      fullyDefinedType(tree1.tpe, "template parent", tree.pos)
+      fullyDefinedType(tree1.tpe, "template parent", tree.span)
       tree1
     case _ =>
       tree
@@ -185,6 +181,8 @@ object Inferencing {
    *
    *  Invariant refinement can be assumed if `PatternType`'s class(es) are final or
    *  case classes (because of `RefChecks#checkCaseClassInheritanceInvariant`).
+   *
+   *  TODO: Update so that GADT symbols can be variant, and we special case final class types in patterns
    */
   def constrainPatternType(tp: Type, pt: Type)(implicit ctx: Context): Boolean = {
     def refinementIsInvariant(tp: Type): Boolean = tp match {
@@ -208,7 +206,9 @@ object Inferencing {
     }
 
     val widePt = if (ctx.scala2Mode || refinementIsInvariant(tp)) pt else widenVariantParams(pt)
-    tp <:< widePt
+    trace(i"constraining pattern type $tp <:< $widePt", gadts, res => s"$res\n${ctx.gadt.debugBoundsDescription}") {
+      tp <:< widePt
+    }
   }
 
   /** The list of uninstantiated type variables bound by some prefix of type `T` which
@@ -279,7 +279,7 @@ object Inferencing {
       case tp: TypeRef =>
         val companion = tp.classSymbol.companionModule
         if (companion.exists)
-          companion.termRef.asSeenFrom(tp.prefix, companion.symbol.owner)
+          companion.termRef.asSeenFrom(tp.prefix, companion.owner)
         else NoType
       case _ => NoType
     }
@@ -288,7 +288,7 @@ object Inferencing {
    *  @return   The list of type symbols that were created
    *            to instantiate undetermined type variables that occur non-variantly
    */
-  def maximizeType(tp: Type, pos: Position, fromScala2x: Boolean)(implicit ctx: Context): List[Symbol] = Stats.track("maximizeType") {
+  def maximizeType(tp: Type, span: Span, fromScala2x: Boolean)(implicit ctx: Context): List[Symbol] = Stats.track("maximizeType") {
     val vs = variances(tp)
     val patternBound = new mutable.ListBuffer[Symbol]
     vs foreachBinding { (tvar, v) =>
@@ -299,7 +299,7 @@ object Inferencing {
         if (bounds.hi <:< bounds.lo || bounds.hi.classSymbol.is(Final) || fromScala2x)
           tvar.instantiate(fromBelow = false)
         else {
-          val wildCard = ctx.newPatternBoundSymbol(UniqueName.fresh(tvar.origin.paramName), bounds, pos)
+          val wildCard = ctx.newPatternBoundSymbol(UniqueName.fresh(tvar.origin.paramName), bounds, span)
           tvar.instantiateWith(wildCard.typeRef)
           patternBound += wildCard
         }
@@ -408,7 +408,7 @@ trait Inferencing { this: Typer =>
       val resultAlreadyConstrained =
         tree.isInstanceOf[Apply] || tree.tpe.isInstanceOf[MethodOrPoly]
       if (!resultAlreadyConstrained)
-        constrainResult(tree.tpe, pt)
+        constrainResult(tree.symbol, tree.tpe, pt)
           // This is needed because it could establish singleton type upper bounds. See i2998.scala.
 
       val tp = tree.tpe.widen
@@ -434,10 +434,7 @@ trait Inferencing { this: Typer =>
       //     found   : Int(1)
       //     required: String
       //     val y: List[List[String]] = List(List(1))
-      val hasUnreportedErrors = state.reporter match {
-        case r: StoreReporter if r.hasErrors => true
-        case _ => false
-      }
+      val hasUnreportedErrors = state.reporter.hasUnreportedErrors
       def constraint = state.constraint
       for (tvar <- qualifying)
         if (!tvar.isInstantiated && state.constraint.contains(tvar)) {
@@ -462,9 +459,9 @@ trait Inferencing { this: Typer =>
 
 /** An enumeration controlling the degree of forcing in "is-dully-defined" checks. */
 @sharable object ForceDegree {
-  class Value(val appliesTo: TypeVar => Boolean, val minimizeAll: Boolean)
-  val none = new Value(_ => false, minimizeAll = false)
-  val all = new Value(_ => true, minimizeAll = false)
-  val noBottom = new Value(_ => true, minimizeAll = false)
+  class Value(val appliesTo: TypeVar => Boolean, val minimizeAll: Boolean, val allowBottom: Boolean = true)
+  val none: Value = new Value(_ => false, minimizeAll = false)
+  val all: Value = new Value(_ => true, minimizeAll = false)
+  val noBottom: Value = new Value(_ => true, minimizeAll = false, allowBottom = false)
 }
 

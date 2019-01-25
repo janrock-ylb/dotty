@@ -3,15 +3,15 @@ package dotc
 package ast
 
 import core._
-import Types._, Contexts._, Constants._, Names._, Flags._
-import SymDenotations._, Symbols._, Annotations._, Trees._, Symbols._
-import Denotations._, Decorators._
+import Types._, Contexts._
+import Symbols._, Annotations._, Trees._, Symbols._
+import Decorators._
 import dotty.tools.dotc.transform.SymUtils._
 import core.tasty.TreePickler.Hole
 
 /** A map that applies three functions and a substitution together to a tree and
  *  makes sure they are coordinated so that the result is well-typed. The functions are
- *  @param  typeMap  A function from Type to Type that gets applied to the
+ *  @param typeMap   A function from Type to Type that gets applied to the
  *                   type of every tree node and to all locally defined symbols,
  *                   followed by the substitution [substFrom := substTo].
  *  @param treeMap   A transformer that translates all encountered subtrees in
@@ -42,7 +42,7 @@ class TreeTypeMap(
   import tpd._
 
   /** If `sym` is one of `oldOwners`, replace by corresponding symbol in `newOwners` */
-  def mapOwner(sym: Symbol) = sym.subst(oldOwners, newOwners)
+  def mapOwner(sym: Symbol): Symbol = sym.subst(oldOwners, newOwners)
 
   /** Replace occurrences of `This(oldOwner)` in some prefix of a type
    *  by the corresponding `This(newOwner)`.
@@ -59,7 +59,7 @@ class TreeTypeMap(
     }
   }
 
-  def mapType(tp: Type) =
+  def mapType(tp: Type): Type =
     mapOwnerThis(typeMap(tp).substSym(substFrom, substTo))
 
   private def updateDecls(prevStats: List[Tree], newStats: List[Tree]): Unit =
@@ -89,13 +89,13 @@ class TreeTypeMap(
     case tree1 =>
       tree1.withType(mapType(tree1.tpe)) match {
         case id: Ident if tpd.needsSelect(id.tpe) =>
-          ref(id.tpe.asInstanceOf[TermRef]).withPos(id.pos)
+          ref(id.tpe.asInstanceOf[TermRef]).withSpan(id.span)
         case ddef @ DefDef(name, tparams, vparamss, tpt, _) =>
           val (tmap1, tparams1) = transformDefs(ddef.tparams)
           val (tmap2, vparamss1) = tmap1.transformVParamss(vparamss)
           val res = cpy.DefDef(ddef)(name, tparams1, vparamss1, tmap2.transform(tpt), tmap2.transform(ddef.rhs))
           res.symbol.transformAnnotations {
-            case ann: BodyAnnotation => ann.derivedAnnotation(res.rhs)
+            case ann: BodyAnnotation => ann.derivedAnnotation(transform(ann.tree))
             case ann => ann
           }
           res
@@ -116,17 +116,22 @@ class TreeTypeMap(
           val guard1 = tmap.transform(guard)
           val rhs1 = tmap.transform(rhs)
           cpy.CaseDef(cdef)(pat1, guard1, rhs1)
+        case labeled @ Labeled(bind, expr) =>
+          val tmap = withMappedSyms(bind.symbol :: Nil)
+          val bind1 = tmap.transformSub(bind)
+          val expr1 = tmap.transform(expr)
+          cpy.Labeled(labeled)(bind1, expr1)
         case Hole(n, args) =>
-          Hole(n, args.mapConserve(transform)).withPos(tree.pos).withType(mapType(tree.tpe))
+          Hole(n, args.mapConserve(transform)).withSpan(tree.span).withType(mapType(tree.tpe))
         case tree1 =>
           super.transform(tree1)
       }
   }
 
-  override def transformStats(trees: List[tpd.Tree])(implicit ctx: Context) =
+  override def transformStats(trees: List[tpd.Tree])(implicit ctx: Context): List[Tree] =
     transformDefs(trees)._2
 
-  private def transformDefs[TT <: tpd.Tree](trees: List[TT])(implicit ctx: Context): (TreeTypeMap, List[TT]) = {
+  def transformDefs[TT <: tpd.Tree](trees: List[TT])(implicit ctx: Context): (TreeTypeMap, List[TT]) = {
     val tmap = withMappedSyms(tpd.localSyms(trees))
     (tmap, tmap.transformSub(trees))
   }

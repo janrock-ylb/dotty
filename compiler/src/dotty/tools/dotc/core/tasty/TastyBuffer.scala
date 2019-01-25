@@ -20,9 +20,12 @@ object TastyBuffer {
     def + (delta: Int): Addr = Addr(this.index + delta)
 
     def relativeTo(base: Addr): Addr = this - base.index - AddrWidth
+
+    def ==(that: Addr): Boolean = this.index == that.index
+    def !=(that: Addr): Boolean = this.index != that.index
   }
 
-  val NoAddr = Addr(-1)
+  val NoAddr: Addr = Addr(-1)
 
   /** The maximal number of address bytes.
    *  Since addresses are written as base-128 natural numbers,
@@ -41,10 +44,10 @@ import TastyBuffer._
 class TastyBuffer(initialSize: Int) {
 
   /** The current byte array, will be expanded as needed */
-  var bytes = new Array[Byte](initialSize)
+  var bytes: Array[Byte] = new Array(initialSize)
 
   /** The number of bytes written */
-  var length = 0
+  var length: Int = 0
 
   // -- Output routines --------------------------------------------
 
@@ -59,7 +62,7 @@ class TastyBuffer(initialSize: Int) {
   /** Write the first `n` bytes of `data`. */
   def writeBytes(data: Array[Byte], n: Int): Unit = {
     while (bytes.length < length + n) bytes = dble(bytes)
-    Array.copy(data, 0, bytes, length, n)
+    System.arraycopy(data, 0, bytes, length, n)
     length += n
   }
 
@@ -155,7 +158,7 @@ class TastyBuffer(initialSize: Int) {
   }
 
   /** The address (represented as a natural number) at address `at` */
-  def getAddr(at: Addr) = Addr(getNat(at))
+  def getAddr(at: Addr): Addr = Addr(getNat(at))
 
   /** The smallest address equal to or following `at` which points to a non-zero byte */
   final def skipZeroes(at: Addr): Addr =
@@ -178,7 +181,7 @@ class TastyBuffer(initialSize: Int) {
   }
 
   /** Fill reserved space at address `at` with address `target` */
-  def fillAddr(at: Addr, target: Addr) =
+  def fillAddr(at: Addr, target: Addr): Unit =
     putNat(at, target.index, AddrWidth)
 
   /** Write address without leading zeroes */

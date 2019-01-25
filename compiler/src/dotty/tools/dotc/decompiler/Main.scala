@@ -1,6 +1,6 @@
 package dotty.tools.dotc.decompiler
 
-import java.nio.file.{Files, Paths}
+import java.nio.file.Files
 
 import dotty.tools.dotc
 import dotty.tools.dotc.core.Contexts._
@@ -12,9 +12,8 @@ import dotty.tools.dotc.core.Contexts._
 object Main extends dotc.Driver {
   override protected def newCompiler(implicit ctx: Context): dotc.Compiler = {
     assert(ctx.settings.fromTasty.value)
-    val outputDir = ctx.settings.outputDir.value
-    if (outputDir != ".")
-      Files.deleteIfExists(Paths.get(outputDir + "/decompiled.scala"))
+    if (!ctx.settings.outputDir.isDefault)
+      Files.deleteIfExists(ctx.settings.outputDir.value.fileNamed("decompiled.scala").jpath)
     new TASTYDecompiler
   }
 

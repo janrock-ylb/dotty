@@ -6,7 +6,8 @@ import ast._
 import core._
 import Types._, ProtoTypes._, Contexts._, Decorators._, Denotations._, Symbols._
 import Implicits._, Flags._
-import util.Positions._
+import util.Spans._
+import util.SourcePosition
 import java.util.regex.Matcher.quoteReplacement
 import reporting.diagnostic.Message
 import reporting.diagnostic.messages._
@@ -15,18 +16,18 @@ object ErrorReporting {
 
   import tpd._
 
-  def errorTree(tree: untpd.Tree, msg: => Message, pos: Position)(implicit ctx: Context): tpd.Tree =
-    tree withType errorType(msg, pos)
+  def errorTree(tree: untpd.Tree, msg: => Message, pos: SourcePosition)(implicit ctx: Context): tpd.Tree =
+    tree.withType(errorType(msg, pos))
 
   def errorTree(tree: untpd.Tree, msg: => Message)(implicit ctx: Context): tpd.Tree =
-    errorTree(tree, msg, tree.pos)
+    errorTree(tree, msg, tree.sourcePos)
 
-  def errorType(msg: => Message, pos: Position)(implicit ctx: Context): ErrorType = {
+  def errorType(msg: => Message, pos: SourcePosition)(implicit ctx: Context): ErrorType = {
     ctx.error(msg, pos)
     ErrorType(msg)
   }
 
-  def wrongNumberOfTypeArgs(fntpe: Type, expectedArgs: List[ParamInfo], actual: List[untpd.Tree], pos: Position)(implicit ctx: Context) =
+  def wrongNumberOfTypeArgs(fntpe: Type, expectedArgs: List[ParamInfo], actual: List[untpd.Tree], pos: SourcePosition)(implicit ctx: Context): ErrorType =
     errorType(WrongNumberOfTypeArgs(fntpe, expectedArgs, actual)(ctx), pos)
 
   class Errors(implicit ctx: Context) {
@@ -40,7 +41,7 @@ object ErrorReporting {
 
     def expectedTypeStr(tp: Type): String = tp match {
       case tp: PolyProto =>
-        em"type arguments [${tp.targs}%, %] and ${expectedTypeStr(tp.resultType)}"
+        em"type arguments [${tp.targs.tpes}%, %] and ${expectedTypeStr(tp.resultType)}"
       case tp: FunProto =>
         val result = tp.resultType match {
           case _: WildcardType | _: IgnoredProto => ""
@@ -51,7 +52,7 @@ object ErrorReporting {
         em"expected type $tp"
     }
 
-    def anonymousTypeMemberStr(tpe: Type) = {
+    def anonymousTypeMemberStr(tpe: Type): String = {
       val kind = tpe match {
           case _: TypeBounds => "type with bounds"
           case _: MethodOrPoly => "method"
@@ -60,7 +61,7 @@ object ErrorReporting {
         em"$kind $tpe"
     }
 
-    def overloadedAltsStr(alts: List[SingleDenotation]) =
+    def overloadedAltsStr(alts: List[SingleDenotation]): String =
       em"overloaded alternatives of ${denotStr(alts.head)} with types\n" +
       em" ${alts map (_.info)}%\n %"
 
@@ -76,11 +77,13 @@ object ErrorReporting {
 
     def exprStr(tree: Tree): String = refStr(tree.tpe)
 
-    def takesNoParamsStr(tree: Tree, kind: String) =
+    def takesNoParamsStr(tree: Tree, kind: String): String =
       if (tree.tpe.widen.exists)
         i"${exprStr(tree)} does not take ${kind}parameters"
-      else
+      else {
+        new FatalError("").printStackTrace()
         i"undefined: $tree # ${tree.uniqueId}: ${tree.tpe.toString} at ${ctx.phase}"
+      }
 
     def patternConstrStr(tree: Tree): String = ???
 
@@ -92,7 +95,7 @@ object ErrorReporting {
     }
 
     /** A subtype log explaining why `found` does not conform to `expected` */
-    def whyNoMatchStr(found: Type, expected: Type) = {
+    def whyNoMatchStr(found: Type, expected: Type): String = {
       def dropJavaMethod(tp: Type): Type = tp match {
         case tp: PolyType =>
           tp.derivedLambdaType(resType = dropJavaMethod(tp.resultType))
@@ -113,7 +116,7 @@ object ErrorReporting {
         ""
     }
 
-    def typeMismatchMsg(found: Type, expected: Type, postScript: String = "") = {
+    def typeMismatchMsg(found: Type, expected: Type, postScript: String = ""): TypeMismatch = {
       // replace constrained TypeParamRefs and their typevars by their bounds where possible
       // the idea is that if the bounds are also not-subtypes of each other to report
       // the type mismatch on the bounds instead of the original TypeParamRefs, since

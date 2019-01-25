@@ -2,22 +2,19 @@ package dotty.tools
 package dotc
 package core
 
-import Contexts._, Types._, Symbols._, Names._, Flags._, Scopes._
-import SymDenotations._, Denotations.SingleDenotation
-import config.Printers.typr
-import util.Positions._
-import NameOps._
+import Contexts._, Types._, Symbols._, Names._, Flags._
+import SymDenotations._
+import util.Spans._
+import util.SourcePosition
 import NameKinds.DepParamName
 import Decorators._
 import StdNames._
-import Annotations._
-import annotation.tailrec
-import config.Config
-import util.Property
 import collection.mutable
 import ast.tpd._
 import reporting.trace
 import reporting.diagnostic.Message
+
+import scala.annotation.internal.sharable
 
 trait TypeOps { this: Context => // TODO: Make standalone object.
 
@@ -57,7 +54,7 @@ trait TypeOps { this: Context => // TODO: Make standalone object.
         tp match {
           case tp: NamedType =>
             val sym = tp.symbol
-            if (sym.isStatic || (tp.prefix `eq` NoPrefix)) tp
+            if (sym.isStatic && !sym.maybeOwner.isOpaqueCompanion || (tp.prefix `eq` NoPrefix)) tp
             else derivedSelect(tp, atVariance(variance max 0)(this(tp.prefix)))
           case tp: ThisType =>
             toPrefix(pre, cls, tp.cls)
@@ -69,7 +66,7 @@ trait TypeOps { this: Context => // TODO: Make standalone object.
       }
     }
 
-    override def reapply(tp: Type) =
+    override def reapply(tp: Type): Type =
       // derived infos have already been subjected to asSeenFrom, hence to need to apply the map again.
       tp
   }
@@ -78,39 +75,45 @@ trait TypeOps { this: Context => // TODO: Make standalone object.
     pre.isStable || !ctx.phase.isTyper
 
   /** Implementation of Types#simplified */
-  final def simplify(tp: Type, theMap: SimplifyMap): Type = tp match {
-    case tp: NamedType =>
-      if (tp.symbol.isStatic || (tp.prefix `eq` NoPrefix)) tp
-      else tp.derivedSelect(simplify(tp.prefix, theMap)) match {
-        case tp1: NamedType if tp1.denotationIsCurrent =>
-          val tp2 = tp1.reduceProjection
-          //if (tp2 ne tp1) println(i"simplified $tp1 -> $tp2")
-          tp2
-        case tp1 => tp1
-      }
-    case tp: TypeParamRef =>
-      if (tp.paramName.is(DepParamName)) {
-        val bounds = ctx.typeComparer.bounds(tp)
-        if (bounds.lo.isRef(defn.NothingClass)) bounds.hi else bounds.lo
-      }
-      else {
-        val tvar = typerState.constraint.typeVarOfParam(tp)
-        if (tvar.exists) tvar else tp
-      }
-    case  _: ThisType | _: BoundType =>
-      tp
-    case tp: TypeAlias =>
-      tp.derivedTypeAlias(simplify(tp.alias, theMap))
-    case AndType(l, r) if !ctx.mode.is(Mode.Type) =>
-      simplify(l, theMap) & simplify(r, theMap)
-    case OrType(l, r) if !ctx.mode.is(Mode.Type) =>
-      simplify(l, theMap) | simplify(r, theMap)
-    case _ =>
-      (if (theMap != null) theMap else new SimplifyMap).mapOver(tp)
+  final def simplify(tp: Type, theMap: SimplifyMap): Type = {
+    def mapOver = (if (theMap != null) theMap else new SimplifyMap).mapOver(tp)
+    tp match {
+      case tp: NamedType =>
+        if (tp.symbol.isStatic || (tp.prefix `eq` NoPrefix)) tp
+        else tp.derivedSelect(simplify(tp.prefix, theMap)) match {
+          case tp1: NamedType if tp1.denotationIsCurrent =>
+            val tp2 = tp1.reduceProjection
+            //if (tp2 ne tp1) println(i"simplified $tp1 -> $tp2")
+            tp2
+          case tp1 => tp1
+        }
+      case tp: TypeParamRef =>
+        if (tp.paramName.is(DepParamName)) {
+          val bounds = ctx.typeComparer.bounds(tp)
+          if (bounds.lo.isRef(defn.NothingClass)) bounds.hi else bounds.lo
+        }
+        else {
+          val tvar = typerState.constraint.typeVarOfParam(tp)
+          if (tvar.exists) tvar else tp
+        }
+      case  _: ThisType | _: BoundType =>
+        tp
+      case tp: AliasingBounds =>
+        tp.derivedAlias(simplify(tp.alias, theMap))
+      case AndType(l, r) if !ctx.mode.is(Mode.Type) =>
+        simplify(l, theMap) & simplify(r, theMap)
+      case OrType(l, r) if !ctx.mode.is(Mode.Type) =>
+        simplify(l, theMap) | simplify(r, theMap)
+      case _: AppliedType | _: MatchType =>
+        val normed = tp.tryNormalize
+        if (normed.exists) normed else mapOver
+      case _ =>
+        mapOver
+    }
   }
 
   class SimplifyMap extends TypeMap {
-    def apply(tp: Type) = simplify(tp, this)
+    def apply(tp: Type): Type = simplify(tp, this)
   }
 
   /** Approximate union type by intersection of its dominators.
@@ -271,6 +274,9 @@ trait TypeOps { this: Context => // TODO: Make standalone object.
     violations.toList
   }
 
+  /** Are we in an inline method body? */
+  def inInlineMethod: Boolean = owner.ownersIterator.exists(_.isInlineMethod)
+
   /** Is `feature` enabled in class `owner`?
    *  This is the case if one of the following two alternatives holds:
    *
@@ -306,24 +312,29 @@ trait TypeOps { this: Context => // TODO: Make standalone object.
   }
 
   /** Is auto-tupling enabled? */
-  def canAutoTuple =
+  def canAutoTuple: Boolean =
     !featureEnabled(defn.LanguageModuleClass, nme.noAutoTupling)
 
-  def scala2Mode =
+  def scala2Mode: Boolean =
     featureEnabled(defn.LanguageModuleClass, nme.Scala2)
 
-  def dynamicsEnabled =
+  def dynamicsEnabled: Boolean =
     featureEnabled(defn.LanguageModuleClass, nme.dynamics)
 
-  def testScala2Mode(msg: => Message, pos: Position, rewrite: => Unit = ()) = {
+  def testScala2Mode(msg: => Message, pos: SourcePosition, replace: => Unit = ()): Boolean = {
     if (scala2Mode) {
       migrationWarning(msg, pos)
-      rewrite
+      replace
     }
     scala2Mode
   }
+
+  /** Is option -language:Scala2 set?
+   *  This test is used when we are too early in the pipeline to consider imports.
+   */
+  def scala2Setting = ctx.settings.language.value.contains(nme.Scala2.toString)
 }
 
 object TypeOps {
-  @sharable var track = false // !!!DEBUG
+  @sharable var track: Boolean = false // !!!DEBUG
 }

@@ -6,8 +6,6 @@ import Types._, Contexts._, Symbols._
 import Decorators._
 import config.Config
 import config.Printers.{constr, typr}
-import TypeApplications.{EtaExpansion, TypeParamInfo}
-import collection.mutable
 
 /** Methods for adding constraints and solving them.
  *
@@ -20,34 +18,55 @@ import collection.mutable
  * By comparison: Constraint handlers are parts of type comparers and can use their functionality.
  * Constraint handlers update the current constraint as a side effect.
  */
-trait ConstraintHandling {
+trait ConstraintHandling[AbstractContext] {
 
-  implicit val ctx: Context
+  def constr_println(msg: => String): Unit = constr.println(msg)
+  def typr_println(msg: => String): Unit = typr.println(msg)
 
-  protected def isSubType(tp1: Type, tp2: Type): Boolean
-  protected def isSameType(tp1: Type, tp2: Type): Boolean
+  implicit def ctx(implicit ac: AbstractContext): Context
 
-  val state: TyperState
-  import state.constraint
+  protected def isSubType(tp1: Type, tp2: Type)(implicit actx: AbstractContext): Boolean
+  protected def isSameType(tp1: Type, tp2: Type)(implicit actx: AbstractContext): Boolean
+
+  protected def constraint: Constraint
+  protected def constraint_=(c: Constraint): Unit
 
   private[this] var addConstraintInvocations = 0
 
   /** If the constraint is frozen we cannot add new bounds to the constraint. */
-  protected var frozenConstraint = false
+  protected var frozenConstraint: Boolean = false
+
+  /** Potentially a type lambda that is still instantiatable, even though the constraint
+   *  is generally frozen.
+   */
+  protected var caseLambda: Type = NoType
 
   /** If set, align arguments `S1`, `S2`when taking the glb
    *  `T1 { X = S1 } & T2 { X = S2 }` of a constraint upper bound for some type parameter.
    *  Aligning means computing `S1 =:= S2` which may change the current constraint.
    *  See note in TypeComparer#distributeAnd.
    */
-  protected var homogenizeArgs = false
+  protected var homogenizeArgs: Boolean = false
 
   /** We are currently comparing type lambdas. Used as a flag for
    *  optimization: when `false`, no need to do an expensive `pruneLambdaParams`
    */
   protected var comparedTypeLambdas: Set[TypeLambda] = Set.empty
 
-  private def addOneBound(param: TypeParamRef, bound: Type, isUpper: Boolean): Boolean =
+  /** Gives for each instantiated type var that does not yet have its `inst` field
+    *  set, the instance value stored in the constraint. Storing instances in constraints
+    *  is done only in a temporary way for contexts that may be retracted
+    *  without also retracting the type var as a whole.
+    */
+  def instType(tvar: TypeVar): Type = constraint.entry(tvar.origin) match {
+    case _: TypeBounds => NoType
+    case tp: TypeParamRef =>
+      var tvar1 = constraint.typeVarOfParam(tp)
+      if (tvar1.exists) tvar1 else tp
+    case tp => tp
+  }
+
+  protected def addOneBound(param: TypeParamRef, bound: Type, isUpper: Boolean)(implicit actx: AbstractContext): Boolean =
     !constraint.contains(param) || {
       def occursIn(bound: Type): Boolean = {
         val b = bound.dealias
@@ -97,34 +116,34 @@ trait ConstraintHandling {
 
   private def location(implicit ctx: Context) = "" // i"in ${ctx.typerState.stateChainStr}" // use for debugging
 
-  protected def addUpperBound(param: TypeParamRef, bound: Type): Boolean = {
+  protected def addUpperBound(param: TypeParamRef, bound: Type)(implicit actx: AbstractContext): Boolean = {
     def description = i"constraint $param <: $bound to\n$constraint"
     if (bound.isRef(defn.NothingClass) && ctx.typerState.isGlobalCommittable) {
       def msg = s"!!! instantiated to Nothing: $param, constraint = ${constraint.show}"
       if (Config.failOnInstantiationToNothing) assert(false, msg)
       else ctx.log(msg)
     }
-    constr.println(i"adding $description$location")
+    constr_println(i"adding $description$location")
     val lower = constraint.lower(param)
     val res =
       addOneBound(param, bound, isUpper = true) &&
       lower.forall(addOneBound(_, bound, isUpper = true))
-    constr.println(i"added $description = $res$location")
+    constr_println(i"added $description = $res$location")
     res
   }
 
-  protected def addLowerBound(param: TypeParamRef, bound: Type): Boolean = {
+  protected def addLowerBound(param: TypeParamRef, bound: Type)(implicit actx: AbstractContext): Boolean = {
     def description = i"constraint $param >: $bound to\n$constraint"
-    constr.println(i"adding $description")
+    constr_println(i"adding $description")
     val upper = constraint.upper(param)
     val res =
       addOneBound(param, bound, isUpper = false) &&
       upper.forall(addOneBound(_, bound, isUpper = false))
-    constr.println(i"added $description = $res$location")
+    constr_println(i"added $description = $res$location")
     res
   }
 
-  protected def addLess(p1: TypeParamRef, p2: TypeParamRef): Boolean = {
+  protected def addLess(p1: TypeParamRef, p2: TypeParamRef)(implicit actx: AbstractContext): Boolean = {
     def description = i"ordering $p1 <: $p2 to\n$constraint"
     val res =
       if (constraint.isLess(p2, p1)) unify(p2, p1)
@@ -133,20 +152,20 @@ trait ConstraintHandling {
         val up2 = p2 :: constraint.exclusiveUpper(p2, p1)
         val lo1 = constraint.nonParamBounds(p1).lo
         val hi2 = constraint.nonParamBounds(p2).hi
-        constr.println(i"adding $description down1 = $down1, up2 = $up2$location")
+        constr_println(i"adding $description down1 = $down1, up2 = $up2$location")
         constraint = constraint.addLess(p1, p2)
         down1.forall(addOneBound(_, hi2, isUpper = true)) &&
         up2.forall(addOneBound(_, lo1, isUpper = false))
       }
-    constr.println(i"added $description = $res$location")
+    constr_println(i"added $description = $res$location")
     res
   }
 
   /** Make p2 = p1, transfer all bounds of p2 to p1
    *  @pre  less(p1)(p2)
    */
-  private def unify(p1: TypeParamRef, p2: TypeParamRef): Boolean = {
-    constr.println(s"unifying $p1 $p2")
+  private def unify(p1: TypeParamRef, p2: TypeParamRef)(implicit actx: AbstractContext): Boolean = {
+    constr_println(s"unifying $p1 $p2")
     assert(constraint.isLess(p1, p2))
     val down = constraint.exclusiveLower(p2, p1)
     val up = constraint.exclusiveUpper(p1, p2)
@@ -160,31 +179,32 @@ trait ConstraintHandling {
   }
 
 
-  protected def isSubType(tp1: Type, tp2: Type, whenFrozen: Boolean): Boolean = {
+  protected def isSubType(tp1: Type, tp2: Type, whenFrozen: Boolean)(implicit actx: AbstractContext): Boolean = {
     if (whenFrozen)
       isSubTypeWhenFrozen(tp1, tp2)
     else
       isSubType(tp1, tp2)
   }
 
-  final def isSubTypeWhenFrozen(tp1: Type, tp2: Type): Boolean = {
-    val saved = frozenConstraint
+  @forceInline final def inFrozenConstraint[T](op: => T): T = {
+    val savedFrozen = frozenConstraint
+    val savedLambda = caseLambda
     frozenConstraint = true
-    try isSubType(tp1, tp2)
-    finally frozenConstraint = saved
+    caseLambda = NoType
+    try op
+    finally {
+      frozenConstraint = savedFrozen
+      caseLambda = savedLambda
+    }
   }
 
-  final def isSameTypeWhenFrozen(tp1: Type, tp2: Type): Boolean = {
-    val saved = frozenConstraint
-    frozenConstraint = true
-    try isSameType(tp1, tp2)
-    finally frozenConstraint = saved
-  }
+  final def isSubTypeWhenFrozen(tp1: Type, tp2: Type)(implicit actx: AbstractContext): Boolean = inFrozenConstraint(isSubType(tp1, tp2))
+  final def isSameTypeWhenFrozen(tp1: Type, tp2: Type)(implicit actx: AbstractContext): Boolean = inFrozenConstraint(isSameType(tp1, tp2))
 
   /** Test whether the lower bounds of all parameters in this
    *  constraint are a solution to the constraint.
    */
-  protected final def isSatisfiable: Boolean =
+  protected final def isSatisfiable(implicit actx: AbstractContext): Boolean =
     constraint.forallParams { param =>
       val TypeBounds(lo, hi) = constraint.entry(param)
       isSubType(lo, hi) || {
@@ -203,7 +223,7 @@ trait ConstraintHandling {
    *  @return the instantiating type
    *  @pre `param` is in the constraint's domain.
    */
-  final def approximation(param: TypeParamRef, fromBelow: Boolean): Type = {
+  final def approximation(param: TypeParamRef, fromBelow: Boolean)(implicit actx: AbstractContext): Type = {
     val avoidParam = new TypeMap {
       override def stopAtStatic = true
       def avoidInArg(arg: Type): Type =
@@ -243,7 +263,7 @@ trait ConstraintHandling {
       case _: TypeBounds =>
         val bound = if (fromBelow) constraint.fullLowerBound(param) else constraint.fullUpperBound(param)
         val inst = avoidParam(bound)
-        typr.println(s"approx ${param.show}, from below = $fromBelow, bound = ${bound.show}, inst = ${inst.show}")
+        typr_println(s"approx ${param.show}, from below = $fromBelow, bound = ${bound.show}, inst = ${inst.show}")
         inst
       case inst =>
         assert(inst.exists, i"param = $param\nconstraint = $constraint")
@@ -251,14 +271,13 @@ trait ConstraintHandling {
     }
   }
 
-  /** The instance type of `param` in the current constraint (which contains `param`).
-   *  If `fromBelow` is true, the instance type is the lub of the parameter's
-   *  lower bounds; otherwise it is the glb of its upper bounds. However,
-   *  a lower bound instantiation can be a singleton type only if the upper bound
-   *  is also a singleton type.
+  /** Widen inferred type `tp` with upper bound `bound`, according to the following rules:
+   *   1. If `tp` is a singleton type, yet `bound` is not a singleton type, nor a subtype
+   *      of `scala.Singleton`, widen `tp`.
+   *   2. If `tp` is a union type, yet upper bound is not a union type,
+   *      approximate the union type from above by an intersection of all common base types.
    */
-  def instanceType(param: TypeParamRef, fromBelow: Boolean): Type = {
-    def upperBound = constraint.fullUpperBound(param)
+  def widenInferred(tp: Type, bound: Type)(implicit actx: AbstractContext): Type = {
     def isMultiSingleton(tp: Type): Boolean = tp.stripAnnots match {
       case tp: SingletonType => true
       case AndType(tp1, tp2) => isMultiSingleton(tp1) | isMultiSingleton(tp2)
@@ -268,13 +287,6 @@ trait ConstraintHandling {
       case tp: TypeParamRef => isMultiSingleton(bounds(tp).hi)
       case _ => false
     }
-    def isFullyDefined(tp: Type): Boolean = tp match {
-      case tp: TypeVar => tp.isInstantiated && isFullyDefined(tp.instanceOpt)
-      case tp: TypeProxy => isFullyDefined(tp.underlying)
-      case tp: AndType => isFullyDefined(tp.tp1) && isFullyDefined(tp.tp2)
-      case tp: OrType  => isFullyDefined(tp.tp1) && isFullyDefined(tp.tp2)
-      case _ => true
-    }
     def isOrType(tp: Type): Boolean = tp.dealias match {
       case tp: OrType => true
       case tp: RefinedOrRecType => isOrType(tp.parent)
@@ -282,25 +294,25 @@ trait ConstraintHandling {
       case WildcardType(bounds: TypeBounds) => isOrType(bounds.hi)
       case _ => false
     }
+    def widenOr(tp: Type) =
+      if (isOrType(tp) && !isOrType(bound)) tp.widenUnion
+      else tp
+    def widenSingle(tp: Type) =
+      if (isMultiSingleton(tp) && !isMultiSingleton(bound) &&
+          !isSubTypeWhenFrozen(bound, defn.SingletonType)) tp.widen
+      else tp
+    widenOr(widenSingle(tp))
+  }
 
-    // First, solve the constraint.
-    var inst = approximation(param, fromBelow).simplified
-
-    // Then, approximate by (1.) - (3.) and simplify as follows.
-    // 1. If instance is from below and is a singleton type, yet upper bound is
-    // not a singleton type or a subtype of `scala.Singleton`, widen the
-    // instance.
-    if (fromBelow && isMultiSingleton(inst) && !isMultiSingleton(upperBound)
-        && !isSubTypeWhenFrozen(upperBound, defn.SingletonType))
-      inst = inst.widen
-
-    // 2. If instance is from below and is a fully-defined union type, yet upper bound
-    // is not a union type, approximate the union type from above by an intersection
-    // of all common base types.
-    if (fromBelow && isOrType(inst) && !isOrType(upperBound))
-      inst = inst.widenUnion
-
-    inst
+  /** The instance type of `param` in the current constraint (which contains `param`).
+   *  If `fromBelow` is true, the instance type is the lub of the parameter's
+   *  lower bounds; otherwise it is the glb of its upper bounds. However,
+   *  a lower bound instantiation can be a singleton type only if the upper bound
+   *  is also a singleton type.
+   */
+  def instanceType(param: TypeParamRef, fromBelow: Boolean)(implicit actx: AbstractContext): Type = {
+    val inst = approximation(param, fromBelow).simplified
+    if (fromBelow) widenInferred(inst, constraint.fullUpperBound(param)) else inst
   }
 
   /** Constraint `c1` subsumes constraint `c2`, if under `c2` as constraint we have
@@ -313,7 +325,7 @@ trait ConstraintHandling {
    *  Both `c1` and `c2` are required to derive from constraint `pre`, possibly
    *  narrowing it with further bounds.
    */
-  protected final def subsumes(c1: Constraint, c2: Constraint, pre: Constraint): Boolean =
+  protected final def subsumes(c1: Constraint, c2: Constraint, pre: Constraint)(implicit actx: AbstractContext): Boolean =
     if (c2 eq pre) true
     else if (c1 eq pre) false
     else {
@@ -327,7 +339,7 @@ trait ConstraintHandling {
     }
 
   /** The current bounds of type parameter `param` */
-  final def bounds(param: TypeParamRef): TypeBounds = {
+  def bounds(param: TypeParamRef)(implicit actx: AbstractContext): TypeBounds = {
     val e = constraint.entry(param)
     if (e.exists) e.bounds
     else {
@@ -341,26 +353,36 @@ trait ConstraintHandling {
    *  and propagate all bounds.
    *  @param tvars   See Constraint#add
    */
-  def addToConstraint(tl: TypeLambda, tvars: List[TypeVar]): Unit =
-    assert {
-      checkPropagated(i"initialized $tl") {
-        constraint = constraint.add(tl, tvars)
-        tl.paramNames.indices.forall { i =>
-          val param = tl.paramRefs(i)
-          val bounds = constraint.nonParamBounds(param)
-          val lower = constraint.lower(param)
-          val upper = constraint.upper(param)
-          if (lower.nonEmpty && !bounds.lo.isRef(defn.NothingClass) ||
-            upper.nonEmpty && !bounds.hi.isRef(defn.AnyClass)) constr.println(i"INIT*** $tl")
-          lower.forall(addOneBound(_, bounds.hi, isUpper = true)) &&
-            upper.forall(addOneBound(_, bounds.lo, isUpper = false))
+  def addToConstraint(tl: TypeLambda, tvars: List[TypeVar])(implicit actx: AbstractContext): Boolean =
+    checkPropagated(i"initialized $tl") {
+      constraint = constraint.add(tl, tvars)
+      tl.paramRefs.forall { param =>
+        constraint.entry(param) match {
+          case bounds: TypeBounds =>
+            val lower = constraint.lower(param)
+            val upper = constraint.upper(param)
+            if (lower.nonEmpty && !bounds.lo.isRef(defn.NothingClass) ||
+              upper.nonEmpty && !bounds.hi.isRef(defn.AnyClass)) constr_println(i"INIT*** $tl")
+            lower.forall(addOneBound(_, bounds.hi, isUpper = true)) &&
+              upper.forall(addOneBound(_, bounds.lo, isUpper = false))
+          case _ =>
+            // Happens if param was already solved while processing earlier params of the same TypeLambda.
+            // See #4720.
+            true
         }
       }
     }
 
   /** Can `param` be constrained with new bounds? */
   final def canConstrain(param: TypeParamRef): Boolean =
-    !frozenConstraint && (constraint contains param)
+    (!frozenConstraint || (caseLambda `eq` param.binder)) && constraint.contains(param)
+
+  /** Is `param` assumed to be a sub- and super-type of any other type?
+   *  This holds if `TypeVarsMissContext` is set unless `param` is a part
+   *  of a MatchType that is currently normalized.
+   */
+  final def assumedTrue(param: TypeParamRef)(implicit actx: AbstractContext): Boolean =
+    ctx.mode.is(Mode.TypevarsMissContext) && (caseLambda `ne` param.binder)
 
   /** Add constraint `param <: bound` if `fromBelow` is false, `param >: bound` otherwise.
    *  `bound` is assumed to be in normalized form, as specified in `firstTry` and
@@ -369,7 +391,7 @@ trait ConstraintHandling {
    *  not be AndTypes and lower bounds may not be OrTypes. This is assured by the
    *  way isSubType is organized.
    */
-  protected def addConstraint(param: TypeParamRef, bound: Type, fromBelow: Boolean): Boolean = {
+  protected def addConstraint(param: TypeParamRef, bound: Type, fromBelow: Boolean)(implicit actx: AbstractContext): Boolean = {
     def description = i"constr $param ${if (fromBelow) ">:" else "<:"} $bound:\n$constraint"
     //checkPropagated(s"adding $description")(true) // DEBUG in case following fails
     checkPropagated(s"added $description") {
@@ -485,7 +507,7 @@ trait ConstraintHandling {
   }
 
   /** Instantiate `param` to `tp` if the constraint stays satisfiable */
-  protected def tryInstantiate(param: TypeParamRef, tp: Type): Boolean = {
+  protected def tryInstantiate(param: TypeParamRef, tp: Type)(implicit actx: AbstractContext): Boolean = {
     val saved = constraint
     constraint =
       if (addConstraint(param, tp, fromBelow = true) &&
@@ -495,21 +517,20 @@ trait ConstraintHandling {
   }
 
   /** Check that constraint is fully propagated. See comment in Config.checkConstraintsPropagated */
-  def checkPropagated(msg: => String)(result: Boolean): Boolean = {
+  def checkPropagated(msg: => String)(result: Boolean)(implicit actx: AbstractContext): Boolean = {
     if (Config.checkConstraintsPropagated && result && addConstraintInvocations == 0) {
-      val saved = frozenConstraint
-      frozenConstraint = true
-      for (p <- constraint.domainParams) {
-        def check(cond: => Boolean, q: TypeParamRef, ordering: String, explanation: String): Unit =
-          assert(cond, i"propagation failure for $p $ordering $q: $explanation\n$msg")
-        for (u <- constraint.upper(p))
-          check(bounds(p).hi <:< bounds(u).hi, u, "<:", "upper bound not propagated")
-        for (l <- constraint.lower(p)) {
-          check(bounds(l).lo <:< bounds(p).hi, l, ">:", "lower bound not propagated")
-          check(constraint.isLess(l, p), l, ">:", "reverse ordering (<:) missing")
+      inFrozenConstraint {
+        for (p <- constraint.domainParams) {
+          def check(cond: => Boolean, q: TypeParamRef, ordering: String, explanation: String): Unit =
+            assert(cond, i"propagation failure for $p $ordering $q: $explanation\n$msg")
+          for (u <- constraint.upper(p))
+            check(bounds(p).hi <:< bounds(u).hi, u, "<:", "upper bound not propagated")
+          for (l <- constraint.lower(p)) {
+            check(bounds(l).lo <:< bounds(p).hi, l, ">:", "lower bound not propagated")
+            check(constraint.isLess(l, p), l, ">:", "reverse ordering (<:) missing")
+          }
         }
       }
-      frozenConstraint = saved
     }
     result
   }

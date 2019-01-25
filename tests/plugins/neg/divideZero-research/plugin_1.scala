@@ -16,21 +16,21 @@ class DivideZero extends MiniPhase with ResearchPlugin {
 
   val phaseName = name
 
-  override def init(options: List[String], phases: List[List[Phase]])(implicit ctx: Context): List[List[Phase]] = {
+  def init(options: List[String], phases: List[List[Phase]])(implicit ctx: Context): List[List[Phase]] = {
     val (before, after) = phases.span(ps => !ps.exists(_.phaseName == "pickler"))
     before ++ (List(this) :: after)
   }
 
   private def isNumericDivide(sym: Symbol)(implicit ctx: Context): Boolean = {
     def test(tpe: String): Boolean =
-      (sym.owner eq ctx.requiredClass(tpe.toTermName)) && sym.name == nme.DIV
+      (sym.owner eq ctx.requiredClass(tpe)) && sym.name == nme.DIV
 
     test("scala.Int") || test("scala.Long") || test("scala.Short") || test("scala.Float") || test("scala.Double")
   }
 
   override def transformApply(tree: tpd.Apply)(implicit ctx: Context): tpd.Tree = tree match {
     case tpd.Apply(fun, tpd.Literal(Constants.Constant(v)) :: Nil) if isNumericDivide(fun.symbol) && v == 0 =>
-      ctx.error("divide by zero", tree.pos)
+      ctx.error("divide by zero", tree.sourcePos)
       tree
     case _ =>
       tree

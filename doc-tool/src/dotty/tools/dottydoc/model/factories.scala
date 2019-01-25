@@ -1,19 +1,13 @@
 package dotty.tools.dottydoc
 package model
 
-import comment._
 import references._
 import dotty.tools.dotc
 import dotc.core.Types
 import Types._
-import dotc.core.TypeApplications._
 import dotc.core.Contexts.Context
 import dotc.core.Symbols.{ Symbol, ClassSymbol }
 import dotty.tools.dotc.core.SymDenotations._
-import dotty.tools.dotc.config.Printers.dottydoc
-import dotty.tools.dotc.core.Names.TypeName
-import dotc.ast.Trees._
-import dotc.core.StdNames._
 
 import scala.annotation.tailrec
 
@@ -26,7 +20,7 @@ object factories {
   type TypeTree = dotty.tools.dotc.ast.Trees.Tree[Type]
 
   def flags(t: Tree)(implicit ctx: Context): List[String] =
-    (t.symbol.flags & SourceModifierFlags)
+    (t.symbol.flags & (if (t.symbol.isType) TypeSourceModifierFlags else TermSourceModifierFlags))
       .flagStrings.toList
       .filter(_ != "<trait>")
       .filter(_ != "interface")
@@ -42,7 +36,9 @@ object factories {
   }
 
   def annotations(sym: Symbol)(implicit ctx: Context): List[String] =
-    sym.annotations.map(_.symbol.showFullName)
+    sym.annotations.collect {
+      case ann if ann.symbol != ctx.definitions.SourceFileAnnot => ann.symbol.showFullName
+    }
 
   private val product = """Product[1-9][0-9]*""".r
 
@@ -68,7 +64,7 @@ object factories {
         val cls = tycon.typeSymbol
 
         if (defn.isFunctionClass(cls))
-          FunctionReference(args.init.map(expandTpe(_, Nil)), expandTpe(args.last))
+          FunctionReference(args.init.map(expandTpe(_, Nil)), expandTpe(args.last), defn.isImplicitFunctionClass(cls))
         else if (defn.isTupleClass(cls))
           TupleReference(args.map(expandTpe(_, Nil)))
         else {

@@ -23,7 +23,7 @@ pipeline:
   # We run tests in parallel. Tests run in a copy of the working directory to avoid conflict
   test:
     group: test
-    image: lampepfl/dotty:2018-05-23
+    image: lampepfl/dotty:2018-12-12
     commands:
       - cp -R . /tmp/1/ && cd /tmp/1/
       - ./project/scripts/sbt ";compile ;test"
@@ -31,21 +31,15 @@ pipeline:
 
   test_bootstrapped:
     group: test
-    image: lampepfl/dotty:2018-05-23
+    image: lampepfl/dotty:2018-12-12
     commands:
       - cp -R . /tmp/2/ && cd /tmp/2/
-      - ./project/scripts/sbt ";dotty-bootstrapped/compile ;dotty-bootstrapped/test"
-
-  test_optimised:
-    group: test
-    image: lampepfl/dotty:2018-05-23
-    commands:
-      - cp -R . /tmp/3/ && cd /tmp/3/
-      - ./project/scripts/sbt dotty-optimised/test
+      - ./project/scripts/sbt ";dotty-bootstrapped/compile ;dotty-bootstrapped/test ;sjsSandbox/run"
+      - ./project/scripts/bootstrapCmdTests
 
   test_sbt:
     group: test
-    image: lampepfl/dotty:2018-05-23
+    image: lampepfl/dotty:2018-12-12
     commands:
       - cp -R . /tmp/4/ && cd /tmp/4/
       - ./project/scripts/sbt sbt-dotty/scripted
@@ -55,10 +49,10 @@ pipeline:
 
   # DOCUMENTATION:
   documentation:
-    image: lampepfl/dotty:2018-05-23
+    image: lampepfl/dotty:2018-12-12
     commands:
       - ./project/scripts/genDocs
-    secrets: [ bot_pass ]
+    secrets: [ bot_token ]
     when:
       event: push
       # We only generate the documentation for the master branch
@@ -67,7 +61,7 @@ pipeline:
   # PUBLISHING:
   # Publishing expect NIGHTLYBUILD or RELEASEBUILD to be set. See dottyVersion in Build.scala
   publish_nightly:
-    image: lampepfl/dotty:2018-05-23
+    image: lampepfl/dotty:2018-12-12
     environment:
       - NIGHTLYBUILD=yes
     commands:
@@ -78,7 +72,7 @@ pipeline:
       environment: nightly
 
   publish_release:
-    image: lampepfl/dotty:2018-05-23
+    image: lampepfl/dotty:2018-12-12
     environment:
       - RELEASEBUILD=yes
     commands:
@@ -102,7 +96,7 @@ pipeline:
       event: tag
 
   publish_sbt_release:
-    image: lampepfl/dotty:2018-05-23
+    image: lampepfl/dotty:2018-12-12
     environment:
       - RELEASEBUILD=yes
     commands:
@@ -120,7 +114,3 @@ pipeline:
     when:
       status: [ failure ]
       event: [ push, tag, deployment ]
-
-branches:
-  # The gh-pages branch holds the documentation and don't need to be built
-  exclude: gh-pages

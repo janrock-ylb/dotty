@@ -2,19 +2,22 @@ package dotty.tools
 package dotc
 package reporting
 
+import java.lang.System.{lineSeparator => EOL}
+
 import core.Contexts.Context
 import core.Decorators._
 import printing.Highlighting.{Blue, Red}
 import printing.SyntaxHighlighting
-import diagnostic.{ErrorMessageID, Message, MessageContainer, NoExplanation}
+import diagnostic.{ErrorMessageID, Message, MessageContainer}
 import diagnostic.messages._
 import util.SourcePosition
-import util.Chars.{ LF, CR, FF, SU }
+import scala.tasty.util.Chars.{ LF, CR, FF, SU }
 import scala.annotation.switch
 
 import scala.collection.mutable
 
 trait MessageRendering {
+
   /** Remove ANSI coloring from `str`, useful for getting real length of
     * strings
     *
@@ -30,7 +33,7 @@ trait MessageRendering {
     */
   def outer(pos: SourcePosition, prefix: String)(implicit ctx: Context): List[String] =
     if (pos.outer.exists) {
-       s"$prefix| This location is in code that was inlined at ${pos.outer}" ::
+       i"$prefix| This location is in code that was inlined at ${pos.outer}" ::
        outer(pos.outer, prefix)
     } else Nil
 
@@ -62,7 +65,7 @@ trait MessageRendering {
 
     val syntax =
       if (ctx.settings.color.value != "never")
-        SyntaxHighlighting(pos.linesSlice).toArray
+        SyntaxHighlighting.highlight(new String(pos.linesSlice)).toCharArray
       else pos.linesSlice
     val lines = linesFrom(syntax)
     val (before, after) = pos.beforeAndAfterPoint
@@ -91,7 +94,7 @@ trait MessageRendering {
     * @return aligned error message
     */
   def errorMsg(pos: SourcePosition, msg: String, offset: Int)(implicit ctx: Context): String = {
-    val padding = msg.lines.foldLeft(pos.startColumnPadding) { (pad, line) =>
+    val padding = msg.linesIterator.foldLeft(pos.startColumnPadding) { (pad, line) =>
       val lineLength = stripColor(line).length
       val maxPad = math.max(0, ctx.settings.pageWidth.value - offset - lineLength) - offset
 
@@ -99,9 +102,9 @@ trait MessageRendering {
       else pad
     }
 
-    msg.lines
+    msg.linesIterator
       .map { line => " " * (offset - 1) + "|" + padding + line}
-      .mkString(sys.props("line.separator"))
+      .mkString(EOL)
   }
 
   /** The separator between errors containing the source file and error type
@@ -132,8 +135,8 @@ trait MessageRendering {
            |${Blue("Explanation")}
            |${Blue("===========")}"""
     )
-    sb.append('\n').append(m.explanation)
-    if (m.explanation.lastOption != Some('\n')) sb.append('\n')
+    sb.append(EOL).append(m.explanation)
+    if (m.explanation.lastOption != Some(EOL)) sb.append(EOL)
     sb.toString
   }
 
@@ -141,12 +144,12 @@ trait MessageRendering {
   def messageAndPos(msg: Message, pos: SourcePosition, diagnosticLevel: String)(implicit ctx: Context): String = {
     val sb = mutable.StringBuilder.newBuilder
     val posString = posStr(pos, diagnosticLevel, msg)
-    if (posString.nonEmpty) sb.append(posString).append('\n')
+    if (posString.nonEmpty) sb.append(posString).append(EOL)
     if (pos.exists) {
       val (srcBefore, srcAfter, offset) = sourceLines(pos)
       val marker = columnMarker(pos, offset)
       val err = errorMsg(pos, msg.msg, offset)
-      sb.append((srcBefore ::: marker :: err :: outer(pos, " " * (offset - 1)) ::: srcAfter).mkString("\n"))
+      sb.append((srcBefore ::: marker :: err :: outer(pos, " " * (offset - 1)) ::: srcAfter).mkString(EOL))
     } else sb.append(msg.msg)
     sb.toString
   }

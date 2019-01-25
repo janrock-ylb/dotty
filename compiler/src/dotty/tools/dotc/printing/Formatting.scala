@@ -2,16 +2,13 @@ package dotty.tools.dotc
 package printing
 
 import core._
-import Texts._, Types._, Flags._, Names._, Symbols._, NameOps._, Contexts._
+import Texts._, Types._, Flags._, Symbols._, Contexts._
 import collection.mutable
-import collection.Map
 import Decorators._
-import scala.annotation.switch
 import scala.util.control.NonFatal
 import reporting.diagnostic.MessageContainer
 import util.DiffUtil
 import Highlighting._
-import SyntaxHighlighting._
 
 object Formatting {
 
@@ -83,9 +80,8 @@ object Formatting {
           hl.show
         case hb: HighlightBuffer =>
           hb.toString
-        case str: String if ctx.settings.color.value != "never" =>
-          new String(SyntaxHighlighting(str).toArray)
-        case _ => super.showArg(arg)
+        case _ =>
+          SyntaxHighlighting.highlight(super.showArg(arg))
       }
   }
 
@@ -171,7 +167,7 @@ object Formatting {
         s"is a reference to a value parameter"
       case sym: Symbol =>
         val info =
-          if (ctx.gadt.bounds.contains(sym))
+          if (ctx.gadt.contains(sym))
             sym.info & ctx.gadt.bounds(sym)
           else
             sym.info
@@ -192,7 +188,7 @@ object Formatting {
       case param: TermParamRef => false
       case skolem: SkolemType => true
       case sym: Symbol =>
-        ctx.gadt.bounds.contains(sym) && ctx.gadt.bounds(sym) != TypeBounds.empty
+        ctx.gadt.contains(sym) && ctx.gadt.bounds(sym) != TypeBounds.empty
       case _ =>
         assert(false, "unreachable")
         false
@@ -244,7 +240,7 @@ object Formatting {
     * ```
     * found:    List[Int]
     * required: List[T]
-    * where:    T is a type in the initalizer of value s which is an alias of
+    * where:    T is a type in the initializer of value s which is an alias of
     *           String
     * ```
     *

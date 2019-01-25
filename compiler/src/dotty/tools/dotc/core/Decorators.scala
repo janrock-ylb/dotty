@@ -3,8 +3,8 @@ package core
 
 import annotation.tailrec
 import Symbols._
-import Contexts._, Names._, Phases._, printing.Texts._, printing.Printer, printing.Showable
-import util.Positions.Position, util.SourcePosition
+import Contexts._, Names._, Phases._, printing.Texts._, printing.Printer
+import util.Spans.Span, util.SourcePosition
 import collection.mutable.ListBuffer
 import dotty.tools.dotc.transform.MegaPhase
 import ast.tpd._
@@ -131,7 +131,7 @@ object Decorators {
     }
 
     /** Union on lists seen as sets */
-    def | (ys: List[T]): List[T] = xs ++ (ys filterNot (xs contains _))
+    def | (ys: List[T]): List[T] = xs ::: (ys filterNot (xs contains _))
 
     /** Intersection on lists seen as sets */
     def & (ys: List[T]): List[T] = xs filter (ys contains _)
@@ -143,7 +143,7 @@ object Decorators {
   }
 
   implicit class TextToString(val text: Text) extends AnyVal {
-    def show(implicit ctx: Context) = text.mkString(ctx.settings.pageWidth.value, ctx.settings.printLines.value)
+    def show(implicit ctx: Context): String = text.mkString(ctx.settings.pageWidth.value, ctx.settings.printLines.value)
   }
 
   /** Test whether a list of strings representing phases contains
@@ -151,32 +151,28 @@ object Decorators {
    *  exact meaning of "contains" here.
    */
   implicit class PhaseListDecorator(val names: List[String]) extends AnyVal {
-    def containsPhase(phase: Phase): Boolean = phase match {
-      case phase: MegaPhase => phase.miniPhases.exists(containsPhase)
-      case _ =>
-        names exists { name =>
-          name == "all" || {
-            val strippedName = name.stripSuffix("+")
-            val logNextPhase = name ne strippedName
-            phase.phaseName.startsWith(strippedName) ||
-              (logNextPhase && phase.prev.phaseName.startsWith(strippedName))
-          }
+    def containsPhase(phase: Phase): Boolean =
+      names.nonEmpty && {
+        phase match {
+          case phase: MegaPhase => phase.miniPhases.exists(containsPhase)
+          case _ =>
+            names exists { name =>
+              name == "all" || {
+                val strippedName = name.stripSuffix("+")
+                val logNextPhase = name != strippedName
+                phase.phaseName.startsWith(strippedName) ||
+                  (logNextPhase && phase.prev.phaseName.startsWith(strippedName))
+              }
+            }
         }
-    }
-  }
-
-  implicit def sourcePos(pos: Position)(implicit ctx: Context): SourcePosition = {
-    def recur(inlinedCalls: List[Tree], pos: Position): SourcePosition = inlinedCalls match {
-      case inlinedCall :: rest =>
-        sourceFile(inlinedCall).atPos(pos).withOuter(recur(rest, inlinedCall.pos))
-      case empty =>
-        ctx.source.atPos(pos)
-    }
-    recur(enclosingInlineds, pos)
+      }
   }
 
   implicit class genericDeco[T](val x: T) extends AnyVal {
-    def reporting(op: T => String): T = { println(op(x)); x }
+    def reporting(op: T => String, printer: config.Printers.Printer = config.Printers.default): T = {
+      printer.println(op(x))
+      x
+    }
     def assertingErrorsReported(implicit ctx: Context): T = {
       assert(ctx.reporter.errorsReported)
       x

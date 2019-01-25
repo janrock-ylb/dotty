@@ -89,7 +89,6 @@ trait Page {
     new SourceFile(virtualFile, Codec.UTF8)
   }
 
-
   protected[this] var _yaml: Map[String, AnyRef /* String | JList[String] */] = _
   protected[this] var _html: Option[String] = _
   protected[this] def initFields(implicit ctx: Context) = {
@@ -115,7 +114,7 @@ trait Page {
     val withoutYaml = virtualFile(
       if (content.startsWith("---\n")) {
         val str =
-          content.lines
+          content.linesIterator
           .drop(1)
           .dropWhile(line => line != "---" && line != "...")
           .drop(1).mkString("\n")

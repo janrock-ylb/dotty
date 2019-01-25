@@ -41,39 +41,43 @@ import scala.collection.mutable
 class ExtractAPI extends Phase {
   override def phaseName: String = "sbt-api"
 
+  override def isRunnable(implicit ctx: Context): Boolean = {
+    def forceRun = ctx.settings.YdumpSbtInc.value || ctx.settings.YforceSbtPhases.value
+    super.isRunnable && (ctx.sbtCallback != null || forceRun)
+  }
+
+  // Check no needed. Does not transform trees
+  override def isCheckable: Boolean = false
+
   // SuperAccessors need to be part of the API (see the scripted test
   // `trait-super` for an example where this matters), this is only the case
   // after `PostTyper` (unlike `ExtractDependencies`, the simplication to trees
   // done by `PostTyper` do not affect this phase because it only cares about
   // definitions, and `PostTyper` does not change definitions).
-  override def runsAfter = Set(transform.PostTyper.name)
+  override def runsAfter: Set[String] = Set(transform.PostTyper.name)
 
   override def run(implicit ctx: Context): Unit = {
     val unit = ctx.compilationUnit
-    val dumpInc = ctx.settings.YdumpSbtInc.value
-    val forceRun = dumpInc || ctx.settings.YforceSbtPhases.value
-    if ((ctx.sbtCallback != null || forceRun) && !unit.isJava) {
-      val sourceFile = unit.source.file
-      if (ctx.sbtCallback != null)
-        ctx.sbtCallback.startSource(sourceFile.file)
+    val sourceFile = unit.source.file
+    if (ctx.sbtCallback != null)
+      ctx.sbtCallback.startSource(sourceFile.file)
 
-      val apiTraverser = new ExtractAPICollector
-      val classes = apiTraverser.apiSource(unit.tpdTree)
-      val mainClasses = apiTraverser.mainClasses
+    val apiTraverser = new ExtractAPICollector
+    val classes = apiTraverser.apiSource(unit.tpdTree)
+    val mainClasses = apiTraverser.mainClasses
 
-      if (dumpInc) {
-        // Append to existing file that should have been created by ExtractDependencies
-        val pw = new PrintWriter(File(sourceFile.jpath).changeExtension("inc").toFile
-          .bufferedWriter(append = true), true)
-        try {
-          classes.foreach(source => pw.println(DefaultShowAPI(source)))
-        } finally pw.close()
-      }
+    if (ctx.settings.YdumpSbtInc.value) {
+      // Append to existing file that should have been created by ExtractDependencies
+      val pw = new PrintWriter(File(sourceFile.jpath).changeExtension("inc").toFile
+        .bufferedWriter(append = true), true)
+      try {
+        classes.foreach(source => pw.println(DefaultShowAPI(source)))
+      } finally pw.close()
+    }
 
-      if (ctx.sbtCallback != null) {
-        classes.foreach(ctx.sbtCallback.api(sourceFile.file, _))
-        mainClasses.foreach(ctx.sbtCallback.mainClass(sourceFile.file, _))
-      }
+    if (ctx.sbtCallback != null) {
+      classes.foreach(ctx.sbtCallback.api(sourceFile.file, _))
+      mainClasses.foreach(ctx.sbtCallback.mainClass(sourceFile.file, _))
     }
   }
 }
@@ -164,9 +168,9 @@ private class ExtractAPICollector(implicit val ctx: Context) extends ThunkHolder
     api.Annotated.of(tp, Array(marker))
   private def marker(name: String) =
     api.Annotation.of(api.Constant.of(Constants.emptyType, name), Array())
-  val orMarker = marker("Or")
-  val byNameMarker = marker("ByName")
-
+  private val orMarker = marker("Or")
+  private val byNameMarker = marker("ByName")
+  private val matchMarker = marker("Match")
 
   /** Extract the API representation of a source file */
   def apiSource(tree: Tree): Seq[api.ClassLike] = {
@@ -245,7 +249,7 @@ private class ExtractAPICollector(implicit val ctx: Context) extends ThunkHolder
           case ex: TypeError =>
             // See neg/i1750a for an example where a cyclic error can arise.
             // The root cause in this example is an illegal "override" of an inner trait
-            ctx.error(ex.toMessage, csym.pos)
+            ctx.error(ex.toMessage, csym.sourcePos)
             defn.ObjectType :: Nil
         }
       if (ValueClasses.isDerivedValueClass(csym)) {
@@ -262,8 +266,7 @@ private class ExtractAPICollector(implicit val ctx: Context) extends ThunkHolder
 
     // Synthetic methods that are always present do not affect the API
     // and can therefore be ignored.
-    def alwaysPresent(s: Symbol) =
-      s.isCompanionMethod || (csym.is(ModuleClass) && s.isConstructor)
+    def alwaysPresent(s: Symbol) = csym.is(ModuleClass) && s.isConstructor
     val decls = cinfo.decls.filter(!alwaysPresent(_))
     val apiDecls = apiDefinitions(decls)
 
@@ -328,7 +331,7 @@ private class ExtractAPICollector(implicit val ctx: Context) extends ThunkHolder
     } else if (sym.is(Mutable, butNot = Accessor)) {
       api.Var.of(sym.name.toString, apiAccess(sym), apiModifiers(sym),
         apiAnnotations(sym).toArray, apiType(sym.info))
-    } else if (sym.isStable) {
+    } else if (sym.isStableMember && !sym.isRealMethod) {
       api.Val.of(sym.name.toString, apiAccess(sym), apiModifiers(sym),
         apiAnnotations(sym).toArray, apiType(sym.info))
     } else {
@@ -507,6 +510,9 @@ private class ExtractAPICollector(implicit val ctx: Context) extends ThunkHolder
         withMarker(s, orMarker)
       case ExprType(resultType) =>
         withMarker(apiType(resultType), byNameMarker)
+      case MatchType(bound, scrut, cases) =>
+        val s = combineApiTypes(apiType(bound) :: apiType(scrut) :: cases.map(apiType): _*)
+        withMarker(s, matchMarker)
       case ConstantType(constant) =>
         api.Constant.of(apiType(constant.tpe), constant.stringValue)
       case AnnotatedType(tpe, annot) =>
@@ -590,7 +596,7 @@ private class ExtractAPICollector(implicit val ctx: Context) extends ThunkHolder
     val annots = new mutable.ListBuffer[api.Annotation]
 
     if (Inliner.hasBodyToInline(s)) {
-      // FIXME: If the body of an inline method changes, all the reverse
+      // FIXME: If the body of an inlineable method changes, all the reverse
       // dependencies of this method need to be recompiled. sbt has no way
       // of tracking method bodies, so as a hack we include the pretty-printed
       // typed tree of the method as part of the signature we send to sbt.

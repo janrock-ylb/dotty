@@ -22,13 +22,12 @@ class DocDriver extends Driver {
     val summary = CompilerCommand.distill(args)(ctx)
 
     ctx.setSettings(summary.sstate)
-    ctx.setSetting(ctx.settings.YkeepComments, true)
     ctx.setSetting(ctx.settings.YcookComments, true)
     ctx.setSetting(ctx.settings.YnoInline, true)
     ctx.setProperty(ContextDoc, new ContextDottydoc)
 
     val fileNames = CompilerCommand.checkUsage(summary, sourcesRequired)(ctx)
-    (fileNames, ctx)
+    fromTastySetup(fileNames, ctx)
   }
 
   override def newCompiler(implicit ctx: Context): Compiler = new DocCompiler

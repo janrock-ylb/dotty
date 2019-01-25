@@ -7,19 +7,14 @@ package transform
 
 import dotty.tools.dotc.transform.MegaPhase._
 import ValueClasses._
-import dotty.tools.dotc.ast.{Trees, tpd}
-import scala.collection.{ mutable, immutable }
-import mutable.ListBuffer
+import dotty.tools.dotc.ast.tpd
+import scala.collection.mutable
 import core._
-import dotty.tools.dotc.core.Phases.Phase
-import Types._, Contexts._, Constants._, Names._, NameOps._, Flags._, DenotTransformers._
-import SymDenotations._, Symbols._, StdNames._, Annotations._, Trees._, Scopes._, Denotations._
+import Types._, Contexts._, Names._, Flags._, DenotTransformers._
+import SymDenotations._, Symbols._, StdNames._, Denotations._
 import TypeErasure.{ valueErasure, ErasedValueType }
-import TypeUtils._
 import NameKinds.{ExtMethName, UniqueExtMethName}
-import util.Positions._
 import Decorators._
-import SymUtils._
 
 /**
  * Perform Step 1 in the inline classes SIP: Creates extension methods for all
@@ -36,6 +31,9 @@ import SymUtils._
  *
  * Finally, if the constructor of a value class is private pr protected
  * it is widened to public.
+ *
+ * Also, drop the Local flag from all private[this] and protected[this] members
+ * that will be moved to the companion object.
  */
 class ExtensionMethods extends MiniPhase with DenotTransformer with FullParameterization { thisPhase =>
 
@@ -45,14 +43,14 @@ class ExtensionMethods extends MiniPhase with DenotTransformer with FullParamete
   /** the following two members override abstract members in Transform */
   override def phaseName: String = ExtensionMethods.name
 
-  override def runsAfter = Set(
+  override def runsAfter: Set[String] = Set(
     ElimRepeated.name,
-    ProtectedAccessors.name  // protected accessors cannot handle code that is moved from class to companion object
+    ProtectedAccessors.name,  // protected accessors cannot handle code that is moved from class to companion object
   )
 
-  override def runsAfterGroupsOf = Set(FirstTransform.name) // need companion objects to exist
+  override def runsAfterGroupsOf: Set[String] = Set(FirstTransform.name) // need companion objects to exist
 
-  override def changesMembers = true // the phase adds extension methods
+  override def changesMembers: Boolean = true // the phase adds extension methods
 
   override def transform(ref: SingleDenotation)(implicit ctx: Context): SingleDenotation = ref match {
     case moduleClassSym: ClassDenotation if moduleClassSym is ModuleClass =>
@@ -98,17 +96,22 @@ class ExtensionMethods extends MiniPhase with DenotTransformer with FullParamete
           moduleClassSym
       }
     case ref: SymDenotation =>
+      var ref1 = ref
       if (isMethodWithExtension(ref.symbol) && ref.hasAnnotation(defn.TailrecAnnot)) {
-        val ref1 = ref.copySymDenotation()
+        ref1 = ref.copySymDenotation()
         ref1.removeAnnotation(defn.TailrecAnnot)
-        ref1
       }
       else if (ref.isConstructor && isDerivedValueClass(ref.owner) && ref.is(AccessFlags)) {
-        val ref1 = ref.copySymDenotation()
+        ref1 = ref.copySymDenotation()
         ref1.resetFlag(AccessFlags)
-        ref1
       }
-      else ref
+      // Drop the Local flag from all private[this] and protected[this] members
+      // that will be moved to the companion object.
+      if (ref.is(Local) && isDerivedValueClass(ref.owner)) {
+        if (ref1 ne ref) ref1.resetFlag(Local)
+        else ref1 = ref1.copySymDenotation(initFlags = ref1.flags &~ Local)
+      }
+      ref1
     case _ =>
       ref
   }
@@ -158,13 +161,7 @@ class ExtensionMethods extends MiniPhase with DenotTransformer with FullParamete
       assert(staticClass.exists, s"$origClass lacks companion, ${origClass.owner.definedPeriodsString} ${origClass.owner.info.decls} ${origClass.owner.info.decls}")
       val extensionMeth = extensionMethod(origMeth)
       ctx.log(s"Value class $origClass spawns extension method.\n  Old: ${origMeth.showDcl}\n  New: ${extensionMeth.showDcl}")
-      val store: ListBuffer[Tree] = extensionDefs.get(staticClass) match {
-        case Some(x) => x
-        case None =>
-          val newC = new ListBuffer[Tree]()
-          extensionDefs(staticClass) = newC
-          newC
-      }
+      val store = extensionDefs.getOrElseUpdate(staticClass, new mutable.ListBuffer[Tree])
       store += fullyParameterizedDef(extensionMeth, tree)
       cpy.DefDef(tree)(rhs = forwarder(extensionMeth, tree))
     } else tree
@@ -172,7 +169,7 @@ class ExtensionMethods extends MiniPhase with DenotTransformer with FullParamete
 }
 
 object ExtensionMethods {
-  val name = "extmethods"
+  val name: String = "extmethods"
 
   /** Generate stream of possible names for the extension version of given instance method `imeth`.
    *  If the method is not overloaded, this stream consists of just "imeth$extension".

@@ -5,9 +5,8 @@ import java.io.{ StringWriter, PrintWriter }
 import java.lang.{ ClassLoader, ExceptionInInitializerError }
 import java.lang.reflect.InvocationTargetException
 
-import scala.util.control.NonFatal
+import scala.runtime.ScalaRunTime
 
-import dotc.core.Types._
 import dotc.core.Contexts.Context
 import dotc.core.Denotations.Denotation
 import dotc.core.Flags
@@ -22,13 +21,12 @@ import dotc.core.StdNames.str
  *       `ReplDriver#resetToInitial` is called, the accompanying instance of
  *       `Rendering` is no longer valid.
  */
-private[repl] class Rendering(compiler: ReplCompiler,
-                              parentClassLoader: Option[ClassLoader] = None) {
+private[repl] class Rendering(parentClassLoader: Option[ClassLoader] = None) {
 
   private[this] var myClassLoader: ClassLoader = _
 
   /** Class loader used to load compiled code */
-  private[this] def classLoader()(implicit ctx: Context) =
+  private[repl] def classLoader()(implicit ctx: Context) =
     if (myClassLoader != null) myClassLoader
     else {
       val parent = parentClassLoader.getOrElse {
@@ -37,11 +35,13 @@ private[repl] class Rendering(compiler: ReplCompiler,
         new java.net.URLClassLoader(compilerClasspath.toArray, classOf[ReplDriver].getClassLoader)
       }
 
-      myClassLoader = new AbstractFileClassLoader(compiler.directory, parent)
+      myClassLoader = new AbstractFileClassLoader(ctx.settings.outputDir.value, parent)
       // Set the current Java "context" class loader to this rendering class loader
       Thread.currentThread.setContextClassLoader(myClassLoader)
       myClassLoader
     }
+
+  private[this] def MaxStringElements = 1000  // no need to mkString billions of elements
 
   /** Load the value of the symbol using reflection.
    *
@@ -55,12 +55,7 @@ private[repl] class Rendering(compiler: ReplCompiler,
       resObj
         .getDeclaredMethods.find(_.getName == sym.name.encode.toString)
         .map(_.invoke(null))
-    val string = value.map {
-      case null        => "null" // Calling .toString on null => NPE
-      case ""          => "\"\"" // Special cased for empty string, following scalac
-      case a: Array[_] => a.mkString("Array(", ", ", ")")
-      case x           => x.toString
-    }
+    val string = value.map(ScalaRunTime.replStringOf(_, MaxStringElements).trim)
     if (!sym.is(Flags.Method) && sym.info == defn.UnitType)
       None
     else
@@ -81,11 +76,8 @@ private[repl] class Rendering(compiler: ReplCompiler,
     val dcl = d.symbol.showUser
 
     try {
-      val resultValue =
-        if (d.symbol.is(Flags.Lazy)) Some("<lazy>")
-        else valueOf(d.symbol)
-
-      resultValue.map(value => s"$dcl = $value")
+      if (d.symbol.is(Flags.Lazy)) Some(dcl)
+      else valueOf(d.symbol).map(value => s"$dcl = $value")
     }
     catch { case ex: InvocationTargetException => Some(renderError(ex)) }
   }

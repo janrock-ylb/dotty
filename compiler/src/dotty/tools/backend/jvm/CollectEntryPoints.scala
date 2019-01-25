@@ -5,30 +5,15 @@ import dotty.tools.dotc.core.Contexts.Context
 import dotty.tools.dotc.core.Types
 import dotty.tools.dotc.transform.MegaPhase._
 import dotty.tools.dotc.ast.tpd
-import dotty.tools.dotc
-import dotty.tools.dotc.core.Flags.FlagSet
-import dotty.tools.dotc.transform.Erasure
-import dotty.tools.dotc.transform.SymUtils._
-import java.io.{File => JFile}
+import java.io.{File => _}
 
-import scala.collection.generic.Clearable
-import scala.collection.mutable
-import scala.reflect.ClassTag
-import dotty.tools.io.{Directory, PlainDirectory, AbstractFile}
-import scala.tools.asm.{ClassVisitor, FieldVisitor, MethodVisitor}
-import scala.tools.nsc.backend.jvm.{BCodeHelpers, BackendInterface}
 import dotty.tools.dotc.core._
-import Periods._
 import SymDenotations._
 import Contexts._
 import Types._
 import Symbols._
-import Denotations._
-import Phases._
-import java.lang.AssertionError
-import dotty.tools.dotc.util.Positions.Position
+import dotty.tools.dotc.util.SourcePosition
 import Decorators._
-import tpd._
 import StdNames.nme
 
 /**
@@ -46,7 +31,7 @@ class CollectEntryPoints extends MiniPhase {
 }
 
 object CollectEntryPoints{
-  def isJavaMainMethod(sym: Symbol)(implicit ctx: Context) = {
+  def isJavaMainMethod(sym: Symbol)(implicit ctx: Context): Boolean = {
     (sym.name == nme.main) && (sym.info match {
       case r@MethodTpe(_, List(defn.ArrayOf(t)), _) =>
         (t.widenDealias =:= defn.StringType) && (
@@ -56,17 +41,16 @@ object CollectEntryPoints{
   }
 
   def isJavaEntryPoint(sym: Symbol)(implicit ctx: Context): Boolean = {
-    import Types.MethodType
     val d = ctx.definitions
     val StringType = d.StringType
     // The given class has a main method.
     def hasJavaMainMethod(sym: Symbol): Boolean =
       (toDenot(sym).info member nme.main).alternatives exists(x => isJavaMainMethod(x.symbol))
 
-    def fail(msg: String, pos: Position = sym.pos) = {
-      ctx.warning(          sym.name +
-        s" has a main method with parameter type Array[String], but ${toDenot(sym).fullName} will not be a runnable program.\n  Reason: $msg",
-        sourcePos(sym.pos)
+    def fail(msg: String, pos: SourcePosition = sym.sourcePos) = {
+      ctx.warning(
+        i"""${sym.name} has a main method with parameter type Array[String], but ${sym.fullName} will not be a runnable program.
+           |Reason: $msg""", sym.sourcePos
         // TODO: make this next claim true, if possible
         //   by generating valid main methods as static in module classes
         //   not sure what the jvm allows here
@@ -108,11 +92,11 @@ object CollectEntryPoints{
                 fail("main methods cannot be generic.")
               case MethodTpe(paramNames, paramTypes, resultType) =>
                 if (resultType :: paramTypes exists (_.typeSymbol.isAbstractType))
-                  fail("main methods cannot refer to type parameters or abstract types.", m.symbol.pos)
+                  fail("main methods cannot refer to type parameters or abstract types.", m.symbol.sourcePos)
                 else
-                  isJavaMainMethod(m.symbol) || fail("main method must have exact signature (Array[String])Unit", m.symbol.pos)
+                  isJavaMainMethod(m.symbol) || fail("main method must have exact signature (Array[String])Unit", m.symbol.sourcePos)
               case tp =>
-                fail(s"don't know what this is: $tp", m.symbol.pos)
+                fail(s"don't know what this is: $tp", m.symbol.sourcePos)
             }
           }
         }

@@ -1,11 +1,15 @@
-import dotty.tools.dotc.quoted.Toolbox._
+import scala.quoted.Toolbox.Default._
 import scala.quoted._
 import scala.reflect.ClassTag
 
 object Arrays {
-  implicit def ArrayIsLiftable[T: Liftable](implicit t: Type[T], ct: Expr[ClassTag[T]]): Liftable[Array[T]] = (arr: Array[T]) => '{
-    new Array[~t](~arr.length.toExpr)(~ct)
-    // TODO add elements
+  implicit def ArrayIsLiftable[T: Liftable](implicit t: Type[T], ct: Expr[ClassTag[T]]): Liftable[Array[T]] = {
+    new Liftable[Array[T]] {
+      def toExpr(arr: Array[T]): Expr[Array[T]] = '{
+        new Array[~t](~arr.length.toExpr)(~ct)
+        // TODO add elements
+      }
+    }
   }
 }
 

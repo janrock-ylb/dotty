@@ -14,7 +14,6 @@ import core.NameOps._
 import ast.Trees._
 import SymUtils._
 import dotty.tools.dotc.ast.tpd
-import dotty.tools.dotc.core.Phases.Phase
 
 import collection.mutable
 import scala.annotation.tailrec
@@ -42,12 +41,12 @@ class ExplicitOuter extends MiniPhase with InfoTransformer { thisPhase =>
   /** List of names of phases that should have finished their processing of all compilation units
     * before this phase starts
     */
-  override def runsAfter = Set(PatternMatcher.name, HoistSuperArgs.name)
+  override def runsAfter: Set[String] = Set(PatternMatcher.name, HoistSuperArgs.name)
 
-  override def changesMembers = true // the phase adds outer accessors
+  override def changesMembers: Boolean = true // the phase adds outer accessors
 
   /** Add outer accessors if a class always needs an outer pointer */
-  override def transformInfo(tp: Type, sym: Symbol)(implicit ctx: Context) = tp match {
+  override def transformInfo(tp: Type, sym: Symbol)(implicit ctx: Context): Type = tp match {
     case tp @ ClassInfo(_, cls, _, decls, _) if needsOuterAlways(cls) =>
       val newDecls = decls.cloneScope
       newOuterAccessors(cls).foreach(newDecls.enter)
@@ -106,7 +105,7 @@ class ExplicitOuter extends MiniPhase with InfoTransformer { thisPhase =>
             parent
           }
           else parent match { // ensure class parent is a constructor
-            case parent: TypeTree => New(parent.tpe, Nil).withPos(impl.pos)
+            case parent: TypeTree => New(parent.tpe, Nil).withSpan(impl.span)
             case _ => parent
           }
         }
@@ -119,7 +118,7 @@ class ExplicitOuter extends MiniPhase with InfoTransformer { thisPhase =>
     if (tree.tpt ne EmptyTree) {
       val cls = tree.tpt.asInstanceOf[TypeTree].tpe.classSymbol
       if (cls.exists && hasOuter(cls.asClass))
-        ctx.error("Not a single abstract method type, requires an outer pointer", tree.pos)
+        ctx.error("Not a single abstract method type, requires an outer pointer", tree.sourcePos)
     }
     tree
   }
@@ -128,7 +127,7 @@ class ExplicitOuter extends MiniPhase with InfoTransformer { thisPhase =>
 object ExplicitOuter {
   import ast.tpd._
 
-  val name = "explicitOuter"
+  val name: String = "explicitOuter"
 
   /** Ensure that class `cls` has outer accessors */
   def ensureOuterAccessors(cls: ClassSymbol)(implicit ctx: Context): Unit =
@@ -177,7 +176,7 @@ object ExplicitOuter {
     val deferredIfTrait = if (owner.is(Trait)) Deferred else EmptyFlags
     val outerAccIfOwn = if (owner == cls) OuterAccessor else EmptyFlags
     newOuterSym(owner, cls, outerAccName(cls),
-      Final | Method | Stable | outerAccIfOwn | deferredIfTrait)
+      Final | Method | StableRealizable | outerAccIfOwn | deferredIfTrait)
   }
 
   private def outerAccName(cls: ClassSymbol)(implicit ctx: Context): TermName =
@@ -360,7 +359,7 @@ object ExplicitOuter {
         }
         if (hasOuterParam(cls))
           methPart(fun) match {
-            case Select(receiver, _) => outerArg(receiver).withPos(fun.pos) :: Nil
+            case Select(receiver, _) => outerArg(receiver).withSpan(fun.span) :: Nil
           }
         else Nil
       } else Nil

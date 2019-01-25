@@ -1,12 +1,16 @@
 package dotty.tools.dotc
 
+import java.nio.file.{Files, Paths}
+
 import dotty.tools.FatalError
 import config.CompilerCommand
+import core.Comments.{ContextDoc, ContextDocstrings}
 import core.Contexts.{Context, ContextBase}
-import util.DotClass
+import core.Mode
 import reporting._
+
 import scala.util.control.NonFatal
-import fromtasty.TASTYCompiler
+import fromtasty.{TASTYCompiler, TastyFileUtil}
 
 /** Run the Dotty compiler.
  *
@@ -14,7 +18,7 @@ import fromtasty.TASTYCompiler
  *  process, but in most cases you only need to call [[process]] on the
  *  existing object [[Main]].
  */
-class Driver extends DotClass {
+class Driver {
 
   protected def newCompiler(implicit ctx: Context): Compiler =
     if (ctx.settings.fromTasty.value) new TASTYCompiler
@@ -33,19 +37,54 @@ class Driver extends DotClass {
         case ex: FatalError  =>
           ctx.error(ex.getMessage) // signals that we should fail compilation.
           ctx.reporter
+        case ex: Throwable =>
+          println(s"$ex while compiling ${fileNames.mkString(", ")}")
+          throw ex
       }
     else ctx.reporter
 
-  protected def initCtx = (new ContextBase).initialCtx
+  protected def initCtx: Context = (new ContextBase).initialCtx
 
-  protected def sourcesRequired = true
+  protected def sourcesRequired: Boolean = true
 
   def setup(args: Array[String], rootCtx: Context): (List[String], Context) = {
     val ctx = rootCtx.fresh
     val summary = CompilerCommand.distill(args)(ctx)
     ctx.setSettings(summary.sstate)
+
+    if (!ctx.settings.YdropComments.value(ctx) || ctx.mode.is(Mode.ReadComments)) {
+      ctx.setProperty(ContextDoc, new ContextDocstrings)
+    }
+
     val fileNames = CompilerCommand.checkUsage(summary, sourcesRequired)(ctx)
-    (fileNames, ctx)
+    fromTastySetup(fileNames, ctx)
+  }
+
+  /** Setup extra classpath and figure out class names for tasty file inputs */
+  protected def fromTastySetup(fileNames0: List[String], ctx0: Context): (List[String], Context) = {
+    if (ctx0.settings.fromTasty.value(ctx0)) {
+      // Resolve classpath and class names of tasty files
+      val (classPaths, classNames) = fileNames0.map { name =>
+        val path = Paths.get(name)
+        if (!name.endsWith(".tasty")) ("", name)
+        else if (Files.exists(path)) {
+          TastyFileUtil.getClassName(path) match {
+            case Some(res) => res
+            case _ =>
+              ctx0.error(s"Could not load classname from $name.")
+              ("", name)
+          }
+        } else {
+          ctx0.error(s"File $name does not exist.")
+          ("", name)
+        }
+      }.unzip
+      val ctx1 = ctx0.fresh
+      val classPaths1 = classPaths.distinct.filter(_ != "")
+      val fullClassPath = (classPaths1 :+ ctx1.settings.classpath.value(ctx1)).mkString(java.io.File.pathSeparator)
+      ctx1.setSetting(ctx1.settings.classpath, fullClassPath)
+      (classNames, ctx1)
+    } else (fileNames0, ctx0)
   }
 
   /** Entry point to the compiler that can be conveniently used with Java reflection.
@@ -111,7 +150,7 @@ class Driver extends DotClass {
    *
    *  In most cases, you do not need a custom `Context` and should
    *  instead use one of the other overloads of `process`. However,
-   *  the other overloads cannot be overriden, instead you
+   *  the other overloads cannot be overridden, instead you
    *  should override this one which they call internally.
    *
    *  Usage example: [[https://github.com/lampepfl/dotty/tree/master/test/test/OtherEntryPointsTest.scala]]

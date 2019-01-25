@@ -5,6 +5,8 @@ package dotc
 import org.junit.{AfterClass, Test}
 import vulpix._
 
+import java.io.{File => JFile}
+
 import scala.concurrent.duration._
 
 class FromTastyTests extends ParallelTesting {
@@ -26,22 +28,10 @@ class FromTastyTests extends ParallelTesting {
     // > dotc -Ythrough-tasty -Ycheck:all <source>
 
     implicit val testGroup: TestGroup = TestGroup("posTestFromTasty")
-    compileTastyInDir("tests/pos", defaultOptions,
-      blacklist = Set(
-        // Wrong number of arguments (only on bootstrapped)
-        "i3130b.scala",
-
-        // Missing position
-        "collections_1.scala",
-
-        // MatchError in SymDenotation.sourceModule on a ThisType
-        "t3612.scala",
-
-        // Fails on MacOS
-        "annot-bootstrap.scala",
-      ),
-      recompilationBlacklist = Set(
-      )
+    compileTastyInDir(s"tests${JFile.separator}pos", defaultOptions,
+      fromTastyFilter = FileFilter.exclude(TestSources.posFromTastyBlacklisted),
+      decompilationFilter = FileFilter.exclude(TestSources.posDecompilationBlacklisted),
+      recompilationFilter = FileFilter.include(TestSources.posRecompilationWhitelist)
     ).checkCompile()
   }
 
@@ -52,12 +42,10 @@ class FromTastyTests extends ParallelTesting {
     // > dotr Test
 
     implicit val testGroup: TestGroup = TestGroup("runTestFromTasty")
-    compileTastyInDir("tests/run", defaultOptions,
-      blacklist = Set(
-        // Closure type miss match
-        "eff-dependent.scala",
-      ),
-      recompilationBlacklist = Set()
+    compileTastyInDir(s"tests${JFile.separator}run", defaultOptions,
+      fromTastyFilter = FileFilter.exclude(TestSources.runFromTastyBlacklisted),
+      decompilationFilter = FileFilter.exclude(TestSources.runDecompilationBlacklisted),
+      recompilationFilter = FileFilter.include(TestSources.runRecompilationWhitelist)
     ).checkRuns()
   }
 }

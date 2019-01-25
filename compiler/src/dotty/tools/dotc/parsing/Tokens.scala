@@ -4,6 +4,7 @@ package parsing
 
 import collection.immutable.BitSet
 import core.Decorators._
+import core.StdNames.nme
 
 abstract class TokensCommon {
   def maxToken: Int
@@ -13,14 +14,14 @@ abstract class TokensCommon {
 
   def tokenRange(lo: Int, hi: Int): TokenSet = BitSet(lo to hi: _*)
 
-  def showTokenDetailed(token: Int) = debugString(token)
+  def showTokenDetailed(token: Int): String = debugString(token)
 
-  def showToken(token: Int) = {
+  def showToken(token: Int): String = {
     val str = tokenString(token)
     if (isKeyword(token)) s"'$str'" else str
   }
 
-  val tokenString, debugString = new Array[String](maxToken + 1)
+  val tokenString, debugString: Array[String] = new Array[String](maxToken + 1)
 
   def enter(token: Int, str: String, debugStr: String = ""): Unit = {
     assert(tokenString(token) == null)
@@ -91,8 +92,8 @@ abstract class TokensCommon {
   //final val LAZY = 59;             enter(LAZY, "lazy")
   //final val THEN = 60;             enter(THEN, "then")
   //final val FORSOME = 61;          enter(FORSOME, "forSome") // TODO: deprecate
-  //final val INLINE = 62;           enter(INLINE, "inline")
-  //final val ENUM = 63;            enter(ENUM, "enum")
+  //final val ENUM = 62;             enter(ENUM, "enum")
+  //final val ERASED = 63;           enter(ERASED, "erased")
 
   /** special symbols */
   final val COMMA = 70;            enter(COMMA, "','")
@@ -128,7 +129,7 @@ abstract class TokensCommon {
   final val firstParen = LPAREN
   final val lastParen = RBRACE
 
-  def buildKeywordArray(keywords: TokenSet) = {
+  def buildKeywordArray(keywords: TokenSet): (Int, Array[Int]) = {
     def start(tok: Token) = tokenString(tok).toTermName.asSimpleName.start
     def sourceKeywords = keywords.toList.filter { (kw: Token) =>
       val ts = tokenString(kw)
@@ -145,16 +146,16 @@ abstract class TokensCommon {
 
 object Tokens extends TokensCommon {
   final val minToken = EMPTY
-  final def maxToken = XMLSTART
+  final def maxToken: Int = XMLSTART
 
   final val INTERPOLATIONID = 10;  enter(INTERPOLATIONID, "string interpolator")
   final val SYMBOLLIT = 11;        enter(SYMBOLLIT, "symbol literal") // TODO: deprecate
 
   final val BACKQUOTED_IDENT = 13; enter(BACKQUOTED_IDENT, "identifier", "backquoted ident")
 
-  final val identifierTokens = BitSet(IDENTIFIER, BACKQUOTED_IDENT)
+  final val identifierTokens: TokenSet = BitSet(IDENTIFIER, BACKQUOTED_IDENT)
 
-  def isIdentifier(token : Int) =
+  def isIdentifier(token : Int): Boolean =
     token >= IDENTIFIER && token <= BACKQUOTED_IDENT
 
   /** alphabetic keywords */
@@ -175,10 +176,8 @@ object Tokens extends TokensCommon {
   final val LAZY = 59;             enter(LAZY, "lazy")
   final val THEN = 60;             enter(THEN, "then")
   final val FORSOME = 61;          enter(FORSOME, "forSome") // TODO: deprecate
-  final val INLINE = 62;           enter(INLINE, "inline")
-  final val TRANSPARENT = 63;      enter(TRANSPARENT, "transparent")
-  final val ENUM = 64;             enter(ENUM, "enum")
-  final val ERASED = 65;           enter(ERASED, "erased")
+  final val ENUM = 62;             enter(ENUM, "enum")
+  final val ERASED = 63;           enter(ERASED, "erased")
 
   /** special symbols */
   final val NEWLINE = 78;          enter(NEWLINE, "end of statement", "new line")
@@ -199,53 +198,56 @@ object Tokens extends TokensCommon {
   /** XML mode */
   final val XMLSTART = 96;         enter(XMLSTART, "$XMLSTART$<") // TODO: deprecate
 
-  final val alphaKeywords = tokenRange(IF, ERASED)
-  final val symbolicKeywords = tokenRange(USCORE, VIEWBOUND)
-  final val symbolicTokens = tokenRange(COMMA, VIEWBOUND)
-  final val keywords = alphaKeywords | symbolicKeywords
+  final val alphaKeywords: TokenSet = tokenRange(IF, ERASED)
+  final val symbolicKeywords: TokenSet = tokenRange(USCORE, VIEWBOUND)
+  final val symbolicTokens: TokenSet = tokenRange(COMMA, VIEWBOUND)
+  final val keywords: TokenSet = alphaKeywords | symbolicKeywords
 
-  final val allTokens = tokenRange(minToken, maxToken)
+  final val allTokens: TokenSet = tokenRange(minToken, maxToken)
 
-  final val simpleLiteralTokens = tokenRange(CHARLIT, STRINGLIT) | BitSet(TRUE, FALSE, SYMBOLLIT)
-  final val literalTokens = simpleLiteralTokens | BitSet(INTERPOLATIONID, NULL)
+  final val simpleLiteralTokens: TokenSet = tokenRange(CHARLIT, STRINGLIT) | BitSet(TRUE, FALSE, SYMBOLLIT)
+  final val literalTokens: TokenSet = simpleLiteralTokens | BitSet(INTERPOLATIONID, NULL)
 
-  final val atomicExprTokens = literalTokens | identifierTokens | BitSet(
+  final val atomicExprTokens: TokenSet = literalTokens | identifierTokens | BitSet(
     USCORE, NULL, THIS, SUPER, TRUE, FALSE, RETURN, XMLSTART)
 
-  final val canStartExpressionTokens = atomicExprTokens | BitSet(
+  final val canStartExpressionTokens: TokenSet = atomicExprTokens | BitSet(
     LBRACE, LPAREN, QBRACE, QPAREN, IF, DO, WHILE, FOR, NEW, TRY, THROW)
 
-  final val canStartTypeTokens = literalTokens | identifierTokens | BitSet(
+  final val canStartTypeTokens: TokenSet = literalTokens | identifierTokens | BitSet(
     THIS, SUPER, USCORE, LPAREN, AT)
 
-  final val canStartBindingTokens = identifierTokens | BitSet(USCORE, LPAREN)
+  final val canStartBindingTokens: TokenSet = identifierTokens | BitSet(USCORE, LPAREN)
 
-  final val templateIntroTokens = BitSet(CLASS, TRAIT, OBJECT, ENUM, CASECLASS, CASEOBJECT)
+  final val templateIntroTokens: TokenSet = BitSet(CLASS, TRAIT, OBJECT, ENUM, CASECLASS, CASEOBJECT)
 
-  final val dclIntroTokens = BitSet(DEF, VAL, VAR, TYPE)
+  final val dclIntroTokens: TokenSet = BitSet(DEF, VAL, VAR, TYPE)
 
-  final val defIntroTokens = templateIntroTokens | dclIntroTokens
+  final val defIntroTokens: TokenSet = templateIntroTokens | dclIntroTokens
 
-  final val localModifierTokens = BitSet(
-    ABSTRACT, FINAL, SEALED, IMPLICIT, INLINE, TRANSPARENT, LAZY, ERASED)
+  final val localModifierTokens: TokenSet = BitSet(
+    ABSTRACT, FINAL, SEALED, IMPLICIT, LAZY, ERASED)
 
-  final val accessModifierTokens = BitSet(
+  final val accessModifierTokens: TokenSet = BitSet(
     PRIVATE, PROTECTED)
 
-  final val modifierTokens = localModifierTokens | accessModifierTokens | BitSet(
+  final val modifierTokens: TokenSet = localModifierTokens | accessModifierTokens | BitSet(
     OVERRIDE)
 
-  final val modifierTokensOrCase = modifierTokens | BitSet(CASE)
+  final val modifierTokensOrCase: TokenSet = modifierTokens | BitSet(CASE)
+
+  final val modifierFollowers = modifierTokens | defIntroTokens
 
   /** Is token only legal as start of statement (eof also included)? */
-  final val mustStartStatTokens = defIntroTokens | modifierTokens | BitSet(
-    IMPORT, PACKAGE)
+  final val mustStartStatTokens: TokenSet = defIntroTokens | modifierTokens | BitSet(IMPORT, PACKAGE)
 
-  final val canStartStatTokens = canStartExpressionTokens | mustStartStatTokens | BitSet(
+  final val canStartStatTokens: TokenSet = canStartExpressionTokens | mustStartStatTokens | BitSet(
     AT, CASE)
 
-  final val canEndStatTokens = atomicExprTokens | BitSet(
+  final val canEndStatTokens: TokenSet = atomicExprTokens | BitSet(
     TYPE, RPAREN, RBRACE, RBRACKET)
 
-  final val numericLitTokens = BitSet(INTLIT, LONGLIT, FLOATLIT, DOUBLELIT)
+  final val numericLitTokens: TokenSet = BitSet(INTLIT, LONGLIT, FLOATLIT, DOUBLELIT)
+
+  final val softModifierNames = Set(nme.inline, nme.opaque)
 }

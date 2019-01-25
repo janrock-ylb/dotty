@@ -2,8 +2,7 @@ package dotty.tools.dotc
 package transform
 
 import core._
-import Flags._, Symbols._, Contexts._, Types._, Scopes._, Decorators._
-import util.HashSet
+import Flags._, Symbols._, Contexts._, Scopes._, Decorators._
 import collection.mutable
 import collection.immutable.BitSet
 import scala.annotation.tailrec
@@ -135,7 +134,7 @@ object OverridingPairs {
             case ex: TypeError =>
               // See neg/i1750a for an example where a cyclic error can arise.
               // The root cause in this example is an illegal "override" of an inner trait
-              ctx.error(ex.toMessage, base.pos)
+              ctx.error(ex.toMessage, base.sourcePos)
           }
         } else {
           curEntry = curEntry.prev

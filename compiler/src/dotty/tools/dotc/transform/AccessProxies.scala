@@ -9,12 +9,10 @@ import Names._
 import NameOps._
 import Decorators._
 import TypeUtils._
-import Annotations.Annotation
 import Types._
 import NameKinds.ClassifiedNameKind
 import ast.Trees._
-import util.Property
-import util.Positions.Position
+import util.Spans.Span
 import config.Printers.transforms
 
 /** A utility class for generating access proxies. Currently used for
@@ -30,7 +28,7 @@ abstract class AccessProxies {
   /** Given the name of an accessor, is the receiver of the call to accessed obtained
    *  as a parameterer?
    */
-  protected def passReceiverAsArg(accessorName: Name)(implicit ctx: Context) = false
+  protected def passReceiverAsArg(accessorName: Name)(implicit ctx: Context): Boolean = false
 
   /** The accessor definitions that need to be added to class `cls`
    *  As a side-effect, this method removes entries from the `accessedBy` map.
@@ -47,14 +45,15 @@ abstract class AccessProxies {
           if (passReceiverAsArg(accessor.name))
             (argss.head.head.select(accessed), tps.takeRight(numTypeParams), argss.tail)
           else
-            (ref(TermRef(cls.thisType, accessed)), tps, argss)
+            (if (accessed.isStatic) ref(accessed) else ref(TermRef(cls.thisType, accessed)),
+             tps, argss)
         val rhs =
           if (accessor.name.isSetterName &&
               forwardedArgss.nonEmpty && forwardedArgss.head.nonEmpty) // defensive conditions
             accessRef.becomes(forwardedArgss.head.head)
           else
             accessRef.appliedToTypes(forwardedTypes).appliedToArgss(forwardedArgss)
-        rhs.withPos(accessed.pos)
+        rhs.withSpan(accessed.span)
       })
 
   /** Add all needed accessors to the `body` of class `cls` */
@@ -70,18 +69,23 @@ abstract class AccessProxies {
     def accessorNameKind: ClassifiedNameKind
     def needsAccessor(sym: Symbol)(implicit ctx: Context): Boolean
 
+    def ifNoHost(reference: RefTree)(implicit ctx: Context): Tree = {
+      assert(false, "no host found for $reference with ${reference.symbol.showLocated} from ${ctx.owner}")
+      reference
+    }
+
     /** A fresh accessor symbol */
-    private def newAccessorSymbol(owner: Symbol, name: TermName, info: Type, pos: Position)(implicit ctx: Context): TermSymbol = {
-      val sym = ctx.newSymbol(owner, name, Synthetic | Method, info, coord = pos).entered
+    private def newAccessorSymbol(owner: Symbol, name: TermName, info: Type, span: Span)(implicit ctx: Context): TermSymbol = {
+      val sym = ctx.newSymbol(owner, name, Synthetic | Method, info, coord = span).entered
       if (sym.allOverriddenSymbols.exists(!_.is(Deferred))) sym.setFlag(Override)
       sym
     }
 
     /** An accessor symbol, create a fresh one unless one exists already */
-    protected def accessorSymbol(owner: Symbol, accessorName: TermName, accessorInfo: Type, accessed: Symbol)(implicit ctx: Context) = {
+    protected def accessorSymbol(owner: Symbol, accessorName: TermName, accessorInfo: Type, accessed: Symbol)(implicit ctx: Context): Symbol = {
       def refersToAccessed(sym: Symbol) = accessedBy.get(sym).contains(accessed)
       owner.info.decl(accessorName).suchThat(refersToAccessed).symbol.orElse {
-        val acc = newAccessorSymbol(owner, accessorName, accessorInfo, accessed.pos)
+        val acc = newAccessorSymbol(owner, accessorName, accessorInfo, accessed.span)
         accessedBy(acc) = accessed
         acc
       }
@@ -90,10 +94,10 @@ abstract class AccessProxies {
     /** Rewire reference to refer to `accessor` symbol */
     private def rewire(reference: RefTree, accessor: Symbol)(implicit ctx: Context): Tree = {
       reference match {
-        case Select(qual, _) => qual.select(accessor)
-        case Ident(name) => ref(accessor)
+        case Select(qual, _) if qual.tpe.derivesFrom(accessor.owner) => qual.select(accessor)
+        case _ => ref(accessor)
       }
-    }.withPos(reference.pos)
+    }.withSpan(reference.span)
 
     /** Given a reference to a getter accessor, the corresponding setter reference */
     def useSetter(getterRef: Tree)(implicit ctx: Context): Tree = getterRef match {
@@ -125,25 +129,21 @@ abstract class AccessProxies {
     def useAccessor(reference: RefTree)(implicit ctx: Context): Tree = {
       val accessed = reference.symbol.asTerm
       var accessorClass = hostForAccessorOf(accessed: Symbol)
-      if (!accessorClass.exists) {
-        val curCls = ctx.owner.enclosingClass
-        transforms.println(i"${curCls.ownersIterator.toList}%, %")
-        ctx.error(i"illegal access to protected ${accessed.showLocated} from $curCls",
-          reference.pos)
-        accessorClass = curCls
+      if (accessorClass.exists) {
+        val accessorName = accessorNameKind(accessed.name)
+        val accessorInfo =
+          accessed.info.ensureMethodic.asSeenFrom(accessorClass.thisType, accessed.owner)
+        val accessor = accessorSymbol(accessorClass, accessorName, accessorInfo, accessed)
+        rewire(reference, accessor)
       }
-      val accessorName = accessorNameKind(accessed.name)
-      val accessorInfo =
-        accessed.info.ensureMethodic.asSeenFrom(accessorClass.thisType, accessed.owner)
-      val accessor = accessorSymbol(accessorClass, accessorName, accessorInfo, accessed)
-      rewire(reference, accessor)
+      else ifNoHost(reference)
     }
 
     /** Replace tree with a reference to an accessor if needed */
     def accessorIfNeeded(tree: Tree)(implicit ctx: Context): Tree = tree match {
       case tree: RefTree if needsAccessor(tree.symbol) =>
         if (tree.symbol.isConstructor) {
-          ctx.error("Implementation restriction: cannot use private constructors in inline methods", tree.pos)
+          ctx.error("Implementation restriction: cannot use private constructors in inlineable methods", tree.sourcePos)
           tree // TODO: create a proper accessor for the private constructor
         }
         else useAccessor(tree)
@@ -156,6 +156,12 @@ object AccessProxies {
   /** Where an accessor for the `accessed` symbol should be placed.
    *  This is the closest enclosing class that has `accessed` as a member.
    */
-  def hostForAccessorOf(accessed: Symbol)(implicit ctx: Context): Symbol =
-    ctx.owner.ownersIterator.findSymbol(_.derivesFrom(accessed.owner))
+  def hostForAccessorOf(accessed: Symbol)(implicit ctx: Context): Symbol = {
+    def recur(cls: Symbol): Symbol =
+      if (!cls.exists) NoSymbol
+      else if (cls.derivesFrom(accessed.owner) ||
+               cls.companionModule.moduleClass == accessed.owner) cls
+      else recur(cls.owner)
+    recur(ctx.owner)
+  }
 }

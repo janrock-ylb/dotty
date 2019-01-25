@@ -2,29 +2,22 @@ package dotty.tools.dotc.transform
 
 import dotty.tools.dotc.ast.tpd
 import dotty.tools.dotc.core.Contexts.Context
-import scala.collection.mutable.ListBuffer
-import dotty.tools.dotc.core.{Scopes, Flags}
-import dotty.tools.dotc.core.Symbols.NoSymbol
-import scala.annotation.tailrec
+import dotty.tools.dotc.core.Flags
 import dotty.tools.dotc.core._
 import Symbols._
 import dotty.tools.dotc.transform.MegaPhase._
 import dotty.tools.dotc.ast.tpd
 import dotty.tools.dotc.core.Contexts.Context
-import scala.collection.mutable
-import dotty.tools.dotc.core.Names.Name
-import NameOps._
 import Types._
-import scala.collection.SortedSet
 import Decorators._
 import StdNames._
-import dotty.tools.dotc.util.Positions.Position
+import dotty.tools.dotc.util.SourcePosition
 import dotty.tools.dotc.config.JavaPlatform
 
 class CollectEntryPoints extends MiniPhase {
 
   /** perform context-dependant initialization */
-  override def prepareForUnit(tree: tpd.Tree)(implicit ctx: Context) = {
+  override def prepareForUnit(tree: tpd.Tree)(implicit ctx: Context): Context = {
     entryPoints = collection.immutable.TreeSet.empty[Symbol](new SymbolOrdering())
     assert(ctx.platform.isInstanceOf[JavaPlatform], "Java platform specific phase")
     ctx
@@ -32,7 +25,7 @@ class CollectEntryPoints extends MiniPhase {
 
   private[this] var entryPoints: Set[Symbol] = _
 
-  def getEntryPoints = entryPoints.toList
+  def getEntryPoints: List[Symbol] = entryPoints.toList
 
   override def phaseName: String = "collectEntryPoints"
   override def transformDefDef(tree: tpd.DefDef)(implicit ctx: Context): tpd.Tree = {
@@ -45,10 +38,10 @@ class CollectEntryPoints extends MiniPhase {
   }
 
   def isJavaEntryPoint(sym: Symbol)(implicit ctx: Context): Boolean = {
-    def fail(msg: String, pos: Position = sym.pos) = {
-      ctx.warning(sym.name +
-        s" has a main method with parameter type Array[String], but ${sym.fullName} will not be a runnable program.\n  Reason: $msg",
-        sourcePos(sym.pos)
+    def fail(msg: String, pos: SourcePosition = sym.sourcePos) = {
+      ctx.warning(
+        i"""${sym.name} has a main method with parameter type Array[String], but ${sym.fullName} will not be a runnable program.
+           |Reason: $msg""", sym.sourcePos
         // TODO: make this next claim true, if possible
         //   by generating valid main methods as static in module classes
         //   not sure what the jvm allows here
@@ -87,11 +80,11 @@ class CollectEntryPoints extends MiniPhase {
                 fail("main methods cannot be generic.")
               case t: MethodType =>
                 if (t.resultType :: t.paramInfos exists (_.typeSymbol.isAbstractType))
-                  fail("main methods cannot refer to type parameters or abstract types.", m.symbol.pos)
+                  fail("main methods cannot refer to type parameters or abstract types.", m.symbol.sourcePos)
                 else
-                  ctx.platform.isMainMethod(m.symbol) || fail("main method must have exact signature (Array[String])Unit", m.symbol.pos)
+                  ctx.platform.isMainMethod(m.symbol) || fail("main method must have exact signature (Array[String])Unit", m.symbol.sourcePos)
               case tp =>
-                fail(s"don't know what this is: $tp", m.symbol.pos)
+                fail(s"don't know what this is: $tp", m.symbol.sourcePos)
             }
         }
       }
