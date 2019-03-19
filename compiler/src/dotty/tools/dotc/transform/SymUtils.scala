@@ -46,8 +46,11 @@ class SymUtils(val self: Symbol) extends AnyVal {
   def isTypeTest(implicit ctx: Context): Boolean =
     self == defn.Any_isInstanceOf || self == defn.Any_typeTest
 
+  def isTypeCast(implicit ctx: Context): Boolean =
+    self == defn.Any_asInstanceOf || self == defn.Any_typeCast
+
   def isTypeTestOrCast(implicit ctx: Context): Boolean =
-    self == defn.Any_asInstanceOf || isTypeTest
+    isTypeCast || isTypeTest
 
   def isVolatile(implicit ctx: Context): Boolean = self.hasAnnotation(defn.VolatileAnnot)
 
@@ -108,12 +111,6 @@ class SymUtils(val self: Symbol) extends AnyVal {
   def isField(implicit ctx: Context): Boolean =
     self.isTerm && !self.is(Method)
 
-  def implClass(implicit ctx: Context): Symbol =
-    self.owner.info.decl(self.name.implClassName).symbol
-
-  def traitOfImplClass(implicit ctx: Context): Symbol =
-    self.owner.info.decl(self.name.traitOfImplClassName).symbol
-
   def annotationsCarrying(meta: ClassSymbol)(implicit ctx: Context): List[Annotation] =
     self.annotations.filter(_.symbol.hasAnnotation(meta))
 
@@ -147,17 +144,18 @@ class SymUtils(val self: Symbol) extends AnyVal {
 
   /** Is symbol directly or indirectly owned by a term symbol? */
   @tailrec final def isLocal(implicit ctx: Context): Boolean = {
-    val owner = self.owner
-    if (owner.isTerm) true
+    val owner = self.maybeOwner
+    if (!owner.exists) false
+    else if (owner.isTerm) true
     else if (owner.is(Package)) false
     else owner.isLocal
   }
 
   /** Is symbol a quote operation? */
   def isQuote(implicit ctx: Context): Boolean =
-    self == defn.QuotedExpr_apply || self == defn.QuotedType_apply
+    self == defn.InternalQuoted_exprQuote || self == defn.InternalQuoted_typeQuote
 
   /** Is symbol a splice operation? */
   def isSplice(implicit ctx: Context): Boolean =
-    self == defn.QuotedExpr_~ || self == defn.QuotedType_~
+    self == defn.QuotedExpr_splice || self == defn.QuotedType_splice
 }

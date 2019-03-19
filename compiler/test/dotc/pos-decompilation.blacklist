@@ -15,3 +15,11 @@ i4006c.scala
 
 # Decompiling RecThis as "this" is incorrect
 avoid.scala
+
+# Need to print empty tree for implicit match
+implicit-match.scala
+implicit-match-nested.scala
+implicit-match-and-inline-match.scala
+
+# Need to add backquotes around "macro" since it's a keyword
+macro-deprecate-dont-touch-backquotedidents.scala

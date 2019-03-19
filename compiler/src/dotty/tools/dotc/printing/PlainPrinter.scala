@@ -67,8 +67,7 @@ class PlainPrinter(_ctx: Context) extends Printer {
     else tp
 
   private def sameBound(lo: Type, hi: Type): Boolean =
-    try ctx.typeComparer.isSameTypeWhenFrozen(lo, hi)
-    catch { case NonFatal(ex) => false }
+    try lo frozen_=:= hi catch { case NonFatal(ex) => false }
 
   private def homogenizeArg(tp: Type) = tp match {
     case TypeBounds(lo, hi) if homogenizedView && sameBound(lo, hi) => homogenize(hi)
@@ -167,7 +166,10 @@ class PlainPrinter(_ctx: Context) extends Printer {
         changePrec(OrTypePrec) { toText(tp1) ~ " | " ~ atPrec(OrTypePrec + 1) { toText(tp2) } }
       case MatchType(bound, scrutinee, cases) =>
         changePrec(GlobalPrec) {
-          def caseText(tp: Type): Text = "case " ~ toText(tp)
+          def caseText(tp: Type): Text = tp match {
+            case defn.MatchCase(pat, body) => "case " ~ toText(pat) ~ " => " ~ toText(body)
+            case _ => "case " ~ toText(tp)
+          }
           def casesText = Text(cases.map(caseText), "\n")
             atPrec(InfixPrec) { toText(scrutinee) } ~
             keywordStr(" match ") ~ "{" ~ casesText ~ "}" ~
@@ -183,8 +185,9 @@ class PlainPrinter(_ctx: Context) extends Printer {
         "<noprefix>"
       case tp: MethodType =>
         changePrec(GlobalPrec) {
+          (if (tp.isContextual) " given " else "") ~
           ("(" + (if (tp.isErasedMethod)   "erased "   else "")
-               + (if (tp.isImplicitMethod) "implicit " else "")
+               + (if (tp.isImplicitMethod && !tp.isContextual) "implicit " else "")
           ) ~ paramsText(tp) ~
           (if (tp.resultType.isInstanceOf[MethodType]) ")" else "): ") ~
           toText(tp.resultType)
@@ -289,7 +292,9 @@ class PlainPrinter(_ctx: Context) extends Printer {
         if (idx >= 0) selfRecName(idx + 1)
         else "{...}.this" // TODO move underlying type to an addendum, e.g. ... z3 ... where z3: ...
       case tp: SkolemType =>
-        if (homogenizedView) toText(tp.info) else toText(tp.repr)
+        if (homogenizedView) toText(tp.info)
+        else if (ctx.settings.XprintTypes.value) "<" ~ toText(tp.repr) ~ ":" ~ toText(tp.info) ~ ">"
+        else toText(tp.repr)
     }
   }
 
@@ -365,7 +370,6 @@ class PlainPrinter(_ctx: Context) extends Printer {
     else if (sym.isAnonymousClass) "anonymous class"
     else if (flags is ModuleClass) "module class"
     else if (flags is ModuleVal) "module"
-    else if (flags is ImplClass) "implementation class"
     else if (flags is Trait) "trait"
     else if (sym.isClass) "class"
     else if (sym.isType) "type"
@@ -471,7 +475,7 @@ class PlainPrinter(_ctx: Context) extends Printer {
 
   def toText(const: Constant): Text = const.tag match {
     case StringTag => stringText("\"" + escapedString(const.value.toString) + "\"")
-    case ClazzTag => "classOf[" ~ toText(const.typeValue.classSymbol) ~ "]"
+    case ClazzTag => "classOf[" ~ toText(const.typeValue) ~ "]"
     case CharTag => literalText(s"'${escapedChar(const.charValue)}'")
     case LongTag => literalText(const.longValue.toString + "L")
     case EnumTag => literalText(const.symbolValue.name.toString)
@@ -519,11 +523,10 @@ class PlainPrinter(_ctx: Context) extends Printer {
       result.reason match {
         case _: NoMatchingImplicits => "No Matching Implicit"
         case _: DivergingImplicit => "Diverging Implicit"
-        case _: ShadowedImplicit => "Shadowed Implicit"
         case result: AmbiguousImplicits =>
           "Ambiguous Implicit: " ~ toText(result.alt1.ref) ~ " and " ~ toText(result.alt2.ref)
         case _ =>
-          "?Unknown Implicit Result?" + result.getClass
+          "Search Failure: " ~ toText(result.tree)
     }
   }
 

@@ -1036,7 +1036,7 @@ class JSCodeGen()(implicit ctx: Context) {
 
   /** Gen JS code for a primitive method call. */
   private def genPrimitiveOp(tree: Apply, isStat: Boolean): js.Tree = {
-    import scala.tools.nsc.backend.ScalaPrimitivesOps._
+    import dotty.tools.backend.ScalaPrimitivesOps._
 
     implicit val pos = tree.span
 
@@ -1076,7 +1076,7 @@ class JSCodeGen()(implicit ctx: Context) {
 
   /** Gen JS code for a simple unary operation. */
   private def genSimpleUnaryOp(tree: Apply, arg: Tree, code: Int): js.Tree = {
-    import scala.tools.nsc.backend.ScalaPrimitivesOps._
+    import dotty.tools.backend.ScalaPrimitivesOps._
 
     implicit val pos = tree.span
 
@@ -1117,7 +1117,7 @@ class JSCodeGen()(implicit ctx: Context) {
 
   /** Gen JS code for a simple binary operation. */
   private def genSimpleBinaryOp(tree: Apply, lhs: Tree, rhs: Tree, code: Int): js.Tree = {
-    import scala.tools.nsc.backend.ScalaPrimitivesOps._
+    import dotty.tools.backend.ScalaPrimitivesOps._
     import js.UnaryOp._
 
     implicit val pos = tree.span
@@ -1332,7 +1332,7 @@ class JSCodeGen()(implicit ctx: Context) {
   private def genUniversalEqualityOp(ltpe: Type, rtpe: Type, lhs: js.Tree, rhs: js.Tree, code: Int)(
       implicit pos: Position): js.Tree = {
 
-    import scala.tools.nsc.backend.ScalaPrimitivesOps._
+    import dotty.tools.backend.ScalaPrimitivesOps._
 
     val bypassEqEq = {
       // Do not call equals if we have a literal null at either side.
@@ -1458,7 +1458,7 @@ class JSCodeGen()(implicit ctx: Context) {
 
   /** Gen JS code for an array operation (get, set or length) */
   private def genArrayOp(tree: Tree, code: Int): js.Tree = {
-    import scala.tools.nsc.backend.ScalaPrimitivesOps._
+    import dotty.tools.backend.ScalaPrimitivesOps._
 
     implicit val pos = tree.span
 
@@ -1575,8 +1575,6 @@ class JSCodeGen()(implicit ctx: Context) {
         genApplyJSMethodGeneric(tree, sym, genExpr(receiver), genActualJSArgs(sym, args), isStat)
       /*else
         genApplyJSClassMethod(genExpr(receiver), sym, genActualArgs(sym, args))*/
-    } else if (foreignIsImplClass(sym.owner)) {
-      genTraitImplApply(sym, args.map(genExpr))
     } else if (sym.isClassConstructor) {
       // Calls to constructors are always statically linked
       genApplyMethodStatically(genExpr(receiver), sym, genActualArgs(sym, args))
@@ -2022,12 +2020,6 @@ class JSCodeGen()(implicit ctx: Context) {
         toIRType(patchedResultType(method)))
   }
 
-  /** Gen a call to a Scala2 impl class method. */
-  private def genTraitImplApply(method: Symbol, arguments: List[js.Tree])(
-      implicit pos: Position): js.Tree = {
-    genApplyStatic(method, arguments)
-  }
-
   /** Gen a call to a non-exposed method of a non-native JS class. */
   private def genApplyJSClassMethod(receiver: js.Tree, method: Symbol,
       arguments: List[js.Tree])(implicit pos: Position): js.Tree = {
@@ -2270,9 +2262,9 @@ class JSCodeGen()(implicit ctx: Context) {
     if (sym == defn.BoxedUnit_UNIT) {
       js.Undefined()
     } else {
-      val instance = genLoadModule(sym.owner)
+      val inst = genLoadModule(sym.owner)
       val method = encodeStaticMemberSym(sym)
-      js.Apply(instance, method, Nil)(toIRType(sym.info))
+      js.Apply(inst, method, Nil)(toIRType(sym.info))
     }
   }
 

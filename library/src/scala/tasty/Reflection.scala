@@ -4,9 +4,9 @@ import scala.tasty.reflect._
 
 abstract class Reflection
     extends Core
-    with CaseDefOps
     with ConstantOps
     with ContextOps
+    with CommentOps
     with FlagsOps
     with IdOps
     with ImportSelectorOps
@@ -14,13 +14,14 @@ abstract class Reflection
     with PatternOps
     with PositionOps
     with Printers
+    with ReportingOps
+    with RootPosition
     with SettingsOps
     with SignatureOps
     with StandardDefinitions
     with SymbolOps
     with TreeOps
     with TreeUtils
-    with TypeOrBoundsTreeOps
     with TypeOrBoundsOps { self =>
 
   def typeOf[T: scala.quoted.Type]: Type =

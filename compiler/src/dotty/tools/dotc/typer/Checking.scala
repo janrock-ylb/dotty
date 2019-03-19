@@ -80,8 +80,8 @@ object Checking {
     if (boundsCheck) checkBounds(orderedArgs, bounds, instantiate)
 
     def checkWildcardApply(tp: Type): Unit = tp match {
-      case tp @ AppliedType(tycon, args) =>
-        if (tycon.isLambdaSub && args.exists(_.isInstanceOf[TypeBounds]))
+      case tp @ AppliedType(tycon, _) =>
+        if (tycon.isLambdaSub && tp.hasWildcardArg)
           ctx.errorOrMigrationWarning(
             ex"unreducible application of higher-kinded type $tycon to wildcard arguments",
             tree.sourcePos)
@@ -90,6 +90,11 @@ object Checking {
     def checkValidIfApply(implicit ctx: Context): Unit =
       checkWildcardApply(tycon.tpe.appliedTo(args.map(_.tpe)))
     checkValidIfApply(ctx.addMode(Mode.AllowLambdaWildcardApply))
+  }
+
+  def checkNoWildcard(tree: Tree)(implicit ctx: Context): Tree = tree.tpe match {
+    case tpe: TypeBounds => errorTree(tree, "no wildcard type allowed here")
+    case _ => tree
   }
 
   /** Check that kind of `arg` has the same outline as the kind of paramBounds.
@@ -376,11 +381,11 @@ object Checking {
           ))
       fail(ParamsNoInline(sym.owner))
 
-    if (sym.is(ImplicitCommon)) {
+    if (sym.is(ImplicitOrImplied)) {
       if (sym.owner.is(Package))
         fail(TopLevelCantBeImplicit(sym))
       if (sym.isType)
-        fail(TypesAndTraitsCantBeImplicit(sym))
+        fail(TypesAndTraitsCantBeImplicit())
     }
     if (!sym.isClass && sym.is(Abstract))
       fail(OnlyClassesCanBeAbstract(sym))
@@ -622,7 +627,7 @@ trait Checking {
       if !mt.isImplicitMethod && !sym.is(Synthetic) => // it's a conversion
         check()
       case AppliedType(tycon, _)
-      if tycon.derivesFrom(defn.Predef_ImplicitConverter) && !sym.is(Synthetic) =>
+      if tycon.derivesFrom(defn.ConversionClass) && !sym.is(Synthetic) =>
         check()
       case _ =>
     }
@@ -634,17 +639,23 @@ trait Checking {
    *    - it is defined in Predef
    *    - it is the scala.reflect.Selectable.reflectiveSelectable conversion
    */
-  def checkImplicitConversionUseOK(sym: Symbol, posd: Positioned)(implicit ctx: Context): Unit = {
-    val conversionOK =
-      !sym.exists ||
-      sym.is(Synthetic) ||
-      sym.info.finalResultType.classSymbols.exists(_.owner.isLinkedWith(sym.owner)) ||
-      defn.isPredefClass(sym.owner) ||
-      sym.name == nme.reflectiveSelectable && sym.maybeOwner.maybeOwner.maybeOwner == defn.ScalaPackageClass
-    if (!conversionOK)
-      checkFeature(defn.LanguageModuleClass, nme.implicitConversions,
-        i"Use of implicit conversion ${sym.showLocated}", NoSymbol, posd.sourcePos)
-  }
+  def checkImplicitConversionUseOK(sym: Symbol, posd: Positioned)(implicit ctx: Context): Unit =
+    if (sym.exists) {
+      val conv =
+        if (sym.is(Implicit)) sym
+        else {
+          assert(sym.name == nme.apply)
+          sym.owner
+        }
+      val conversionOK =
+        conv.is(Synthetic) ||
+        sym.info.finalResultType.classSymbols.exists(_.isLinkedWith(conv.owner)) ||
+        defn.isPredefClass(conv.owner) ||
+        conv.name == nme.reflectiveSelectable && conv.maybeOwner.maybeOwner.maybeOwner == defn.ScalaPackageClass
+      if (!conversionOK)
+        checkFeature(defn.LanguageModuleClass, nme.implicitConversions,
+          i"Use of implicit conversion ${conv.showLocated}", NoSymbol, posd.sourcePos)
+    }
 
   /** Issue a feature warning if feature is not enabled */
   def checkFeature(base: ClassSymbol,
@@ -738,10 +749,13 @@ trait Checking {
     def checkDecl(decl: Symbol): Unit = {
       for (other <- seen(decl.name)) {
         typr.println(i"conflict? $decl $other")
-        if (decl.matches(other)) {
+        def javaFieldMethodPair =
+          decl.is(JavaDefined) && other.is(JavaDefined) &&
+          decl.is(Method) != other.is(Method)
+        if ((decl.signature.clashes(other.signature) || decl.matches(other)) && !javaFieldMethodPair) {
           def doubleDefError(decl: Symbol, other: Symbol): Unit =
             if (!decl.info.isErroneous && !other.info.isErroneous)
-              ctx.error(DoubleDeclaration(decl, other), decl.sourcePos)
+              ctx.error(DoubleDefinition(decl, other, cls), decl.sourcePos)
           if (decl is Synthetic) doubleDefError(other, decl)
           else doubleDefError(decl, other)
         }
@@ -769,6 +783,31 @@ trait Checking {
       else if (called.is(Trait) && !caller.mixins.contains(called))
         ctx.error(i"""$called is already implemented by super${caller.superClass},
                    |its constructor cannot be called again""", call.sourcePos)
+
+      if (caller.is(Module)) {
+        val traverser = new TreeTraverser {
+          def traverse(tree: Tree)(implicit ctx: Context) = tree match {
+            case tree: RefTree if tree.isTerm && (tree.tpe.widen.classSymbol eq caller) =>
+              ctx.error("super constructor cannot be passed a self reference", tree.sourcePos)
+            case _ =>
+              traverseChildren(tree)
+          }
+        }
+        traverser.traverse(call)
+      }
+
+      // Check that constructor call is of the form _.<init>(args1)...(argsN).
+      // This guards against calls resulting from inserted implicits or applies.
+      def checkLegalConstructorCall(tree: Tree, encl: Tree, kind: String): Unit = tree match {
+        case Apply(fn, _) => checkLegalConstructorCall(fn, tree, "")
+        case TypeApply(fn, _) => checkLegalConstructorCall(fn, tree, "type ")
+        case Select(_, nme.CONSTRUCTOR) => // ok
+        case _ => ctx.error(s"too many ${kind}arguments in parent constructor", encl.sourcePos)
+      }
+      call match {
+        case Apply(fn, _) => checkLegalConstructorCall(fn, call, "")
+        case _ =>
+      }
     }
 
   /** Check that `tpt` does not define a higher-kinded type */
@@ -901,14 +940,21 @@ trait Checking {
     }
 
   /** Check that all case classes that extend `scala.Enum` are `enum` cases */
-  def checkEnum(cdef: untpd.TypeDef, cls: Symbol, parent: Symbol)(implicit ctx: Context): Unit = {
+  def checkEnum(cdef: untpd.TypeDef, cls: Symbol, firstParent: Symbol)(implicit ctx: Context): Unit = {
     import untpd.modsDeco
     def isEnumAnonCls =
       cls.isAnonymousClass &&
       cls.owner.isTerm &&
       (cls.owner.flagsUNSAFE.is(Case) || cls.owner.name == nme.DOLLAR_NEW)
-    if (!cdef.mods.isEnumCase && !isEnumAnonCls)
-      ctx.error(CaseClassCannotExtendEnum(cls, parent), cdef.sourcePos)
+    if (!cdef.mods.isEnumCase && !isEnumAnonCls) {
+      // Since enums are classes and Namer checks that classes don't extend multiple classes, we only check the class
+      // parent.
+      //
+      // Unlike firstParent.derivesFrom(defn.EnumClass), this test allows inheriting from `Enum` by hand;
+      // see enum-List-control.scala.
+      if (cls.is(Case) || firstParent.is(Enum))
+        ctx.error(ClassCannotExtendEnum(cls, firstParent), cdef.sourcePos)
+    }
   }
 
   /** Check that all references coming from enum cases in an enum companion object
@@ -965,7 +1011,7 @@ trait Checking {
         val cases =
           for (stat <- impl.body if isCase(stat))
           yield untpd.Ident(stat.symbol.name.toTermName)
-        val caseImport: Import = Import(ref(cdef.symbol), cases)
+        val caseImport: Import = Import(impliedOnly = false, ref(cdef.symbol), cases)
         val caseCtx = enumCtx.importContext(caseImport, caseImport.symbol)
         for (stat <- impl.body) checkCaseOrDefault(stat, caseCtx)
       case _ =>
@@ -975,7 +1021,7 @@ trait Checking {
 
 trait ReChecking extends Checking {
   import tpd._
-  override def checkEnum(cdef: untpd.TypeDef, cls: Symbol, parent: Symbol)(implicit ctx: Context): Unit = ()
+  override def checkEnum(cdef: untpd.TypeDef, cls: Symbol, firstParent: Symbol)(implicit ctx: Context): Unit = ()
   override def checkRefsLegal(tree: tpd.Tree, badOwner: Symbol, allowed: (Name, Symbol) => Boolean, where: String)(implicit ctx: Context): Unit = ()
   override def checkEnumCaseRefsLegal(cdef: TypeDef, enumCtx: Context)(implicit ctx: Context): Unit = ()
 }

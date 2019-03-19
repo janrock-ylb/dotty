@@ -81,7 +81,7 @@ object TypeTestsCasts {
     /** Approximate type parameters depending on variance */
     def stripTypeParam(tp: Type)(implicit ctx: Context) = new ApproximatingTypeMap {
       def apply(tp: Type): Type = tp match {
-        case tp: TypeRef if tp.underlying.isInstanceOf[TypeBounds] =>
+        case tp: TypeRef if isBounds(tp.underlying) =>
           val lo = apply(tp.info.loBound)
           val hi = apply(tp.info.hiBound)
           range(lo, hi)
@@ -96,9 +96,9 @@ object TypeTestsCasts {
       val tvars = constrained(typeLambda, untpd.EmptyTree, alwaysAddTypeVars = true)._2.map(_.tpe)
       val P1 = tycon.appliedTo(tvars)
 
-      debug.println("P : " + P)
-      debug.println("P1 : " + P1)
-      debug.println("X : " + X)
+      debug.println("P : " + P.show)
+      debug.println("P1 : " + P1.show)
+      debug.println("X : " + X.show)
 
       P1 <:< X       // constraint P1
 
@@ -106,7 +106,7 @@ object TypeTestsCasts {
       maximizeType(P1, span, fromScala2x = true)
 
       val res = P1 <:< P
-      debug.println("P1 : " + P1)
+      debug.println("P1 : " + P1.show)
       debug.println("P1 <:< P = " + res)
 
       res
@@ -122,9 +122,19 @@ object TypeTestsCasts {
           case _                   => recur(defn.AnyType, tpT)
         }
       case tpe: AppliedType     =>
-        // first try withou striping type parameters for performance
-        isClassDetermined(X, tpe)(ctx.fresh.setNewTyperState()) ||
-        isClassDetermined(stripTypeParam(X), tpe)(ctx.fresh.setNewTyperState())
+        X.widen match {
+          case OrType(tp1, tp2) =>
+            // This case is required to retrofit type inference,
+            // which cut constraints in the following two cases:
+            //   - T1 <:< T2 | T3
+            //   - T1 & T2 <:< T3
+            // See TypeComparer#either
+            recur(tp1, P) && recur(tp2, P)
+          case _ =>
+            // first try withou striping type parameters for performance
+            isClassDetermined(X, tpe)(ctx.fresh.setNewTyperState()) ||
+            isClassDetermined(stripTypeParam(X), tpe)(ctx.fresh.setNewTyperState())
+        }
       case AndType(tp1, tp2)    => recur(X, tp1) && recur(X, tp2)
       case OrType(tp1, tp2)     => recur(X, tp1) && recur(X, tp2)
       case AnnotatedType(t, _)  => recur(X, t)
@@ -154,19 +164,20 @@ object TypeTestsCasts {
           else tp.classSymbol
 
         def foundCls = effectiveClass(expr.tpe.widen)
-        // println(i"ta $tree, found = $foundCls")
 
         def inMatch =
           fun.symbol == defn.Any_typeTest ||  // new scheme
           expr.symbol.is(Case)                // old scheme
 
-        def transformIsInstanceOf(expr:Tree, testType: Type, flagUnrelated: Boolean): Tree = {
+        def transformIsInstanceOf(expr: Tree, testType: Type, flagUnrelated: Boolean): Tree = {
           def testCls = effectiveClass(testType.widen)
 
-          def unreachable(why: => String) =
+          def unreachable(why: => String): Boolean = {
             if (flagUnrelated)
               if (inMatch) ctx.error(em"this case is unreachable since $why", expr.sourcePos)
               else ctx.warning(em"this will always yield false since $why", expr.sourcePos)
+            false
+          }
 
           /** Are `foundCls` and `testCls` classes that allow checks
            *  whether a test would be always false?
@@ -181,25 +192,22 @@ object TypeTestsCasts {
                // we don't have the logic to handle derived value classes
 
           /** Check whether a runtime test that a value of `foundCls` can be a `testCls`
-           *  can be true in some cases. Issure a warning or an error if that's not the case.
+           *  can be true in some cases. Issues a warning or an error otherwise.
            */
           def checkSensical: Boolean =
             if (!isCheckable) true
             else if (foundCls.isPrimitiveValueClass && !testCls.isPrimitiveValueClass) {
-                ctx.error("cannot test if value types are references", tree.sourcePos)
-                false
-              }
+              ctx.error("cannot test if value types are references", tree.sourcePos)
+              false
+            }
             else if (!foundCls.derivesFrom(testCls)) {
-              if (foundCls.is(Final)) {
+              val unrelated = !testCls.derivesFrom(foundCls) && (
+                testCls.is(Final) || !testCls.is(Trait) && !foundCls.is(Trait)
+              )
+              if (foundCls.is(Final))
                 unreachable(i"$foundCls is not a subclass of $testCls")
-                false
-              }
-              else if (!testCls.derivesFrom(foundCls) &&
-                       (testCls.is(Final) ||
-                        !testCls.is(Trait) && !foundCls.is(Trait))) {
+              else if (unrelated)
                 unreachable(i"$foundCls and $testCls are unrelated")
-                false
-              }
               else true
             }
             else true
@@ -233,6 +241,13 @@ object TypeTestsCasts {
             unbox(expr.ensureConforms(defn.ObjectType), testType)
           else if (isDerivedValueClass(testCls)) {
             expr // adaptToType in Erasure will do the necessary type adaptation
+          }
+          else if (testCls eq defn.NothingClass) {
+            // In the JVM `x.asInstanceOf[Nothing]` would throw a class cast exception except when `x eq null`.
+            // To avoid this loophole we execute `x` and then regardless of the result throw a `ClassCastException`
+            val throwCCE = Throw(New(defn.ClassCastExceptionClass.typeRef, defn.ClassCastExceptionClass_stringConstructor,
+                Literal(Constant("Cannot cast to scala.Nothing")) :: Nil))
+            Block(expr :: Nil, throwCCE).withSpan(expr.span)
           }
           else
             derivedTree(expr, defn.Any_asInstanceOf, testType)
@@ -277,7 +292,7 @@ object TypeTestsCasts {
             ctx.warning(i"the type test for $argType cannot be checked at runtime", tree.sourcePos)
           transformTypeTest(expr, tree.args.head.tpe, flagUnrelated = true)
         }
-        else if (sym eq defn.Any_asInstanceOf)
+        else if (sym.isTypeCast)
           transformAsInstanceOf(erasure(tree.args.head.tpe))
         else tree
 

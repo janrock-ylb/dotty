@@ -29,8 +29,8 @@ import scala.reflect.ClassTag
 object Splicer {
   import tpd._
 
-  /** Splice the Tree for a Quoted expression. `~'(xyz)` becomes `xyz`
-   *  and for `~xyz` the tree of `xyz` is interpreted for which the
+  /** Splice the Tree for a Quoted expression. `${'{xyz}}` becomes `xyz`
+   *  and for `$xyz` the tree of `xyz` is interpreted for which the
    *  resulting expression is returned as a `Tree`
    *
    *  See: `Staging`
@@ -59,8 +59,8 @@ object Splicer {
       }
   }
 
-  /** Check that the Tree can be spliced. `~'(xyz)` becomes `xyz`
-    *  and for `~xyz` the tree of `xyz` is interpreted for which the
+  /** Check that the Tree can be spliced. `${'{xyz}}` becomes `xyz`
+    *  and for `$xyz` the tree of `xyz` is interpreted for which the
     *  resulting expression is returned as a `Tree`
     *
     *  See: `Staging`
@@ -95,7 +95,7 @@ object Splicer {
     }
 
     protected def interpretQuote(tree: Tree)(implicit env: Env): Object =
-      new scala.quoted.Exprs.TastyTreeExpr(tree)
+      new scala.quoted.Exprs.TastyTreeExpr(Inlined(EmptyTree, Nil, tree).withSpan(tree.span))
 
     protected def interpretTypeQuote(tree: Tree)(implicit env: Env): Object =
       new scala.quoted.Types.TreeType(tree)
@@ -106,19 +106,15 @@ object Splicer {
     protected def interpretVarargs(args: List[Object])(implicit env: Env): Object =
       args.toSeq
 
-    protected def interpretTastyContext()(implicit env: Env): Object = {
-      new ReflectionImpl(ctx) {
-        override def rootPosition: SourcePosition = pos
-      }
-    }
+    protected def interpretTastyContext()(implicit env: Env): Object = ReflectionImpl(ctx, pos)
 
     protected def interpretStaticMethodCall(moduleClass: Symbol, fn: Symbol, args: => List[Object])(implicit env: Env): Object = {
-      val (instance, clazz) =
+      val (inst, clazz) =
         if (moduleClass.name.startsWith(str.REPL_SESSION_LINE)) {
           (null, loadReplLineClass(moduleClass))
         } else {
-          val instance = loadModule(moduleClass)
-          (instance, instance.getClass)
+          val inst = loadModule(moduleClass)
+          (inst, inst.getClass)
         }
 
       def getDirectName(tp: Type, name: TermName): TermName = tp.widenDealias match {
@@ -129,7 +125,7 @@ object Splicer {
 
       val name = getDirectName(fn.info.finalResultType, fn.name.asTermName)
       val method = getMethod(clazz, name, paramsSig(fn))
-      stopIfRuntimeException(method.invoke(instance, args: _*))
+      stopIfRuntimeException(method.invoke(inst, args: _*))
     }
 
     protected def interpretModuleAccess(fn: Symbol)(implicit env: Env): Object =
@@ -311,10 +307,17 @@ object Splicer {
     protected def unexpectedTree(tree: Tree)(implicit env: Env): Result
 
     protected final def interpretTree(tree: Tree)(implicit env: Env): Result = tree match {
-      case Apply(TypeApply(fn, _), quoted :: Nil) if fn.symbol == defn.QuotedExpr_apply =>
-        interpretQuote(quoted)
+      case Apply(TypeApply(fn, _), quoted :: Nil) if fn.symbol == defn.InternalQuoted_exprQuote =>
+        val quoted1 = quoted match {
+          case quoted: Ident if quoted.symbol.is(InlineByNameProxy) =>
+            // inline proxy for by-name parameter
+            quoted.symbol.defTree.asInstanceOf[DefDef].rhs
+          case Inlined(EmptyTree, _, quoted) => quoted
+          case _ => quoted
+        }
+        interpretQuote(quoted1)
 
-      case TypeApply(fn, quoted :: Nil) if fn.symbol == defn.QuotedType_apply =>
+      case TypeApply(fn, quoted :: Nil) if fn.symbol == defn.InternalQuoted_typeQuote =>
         interpretTypeQuote(quoted)
 
       case Literal(Constant(value)) =>
@@ -336,6 +339,8 @@ object Splicer {
           interpretStaticMethodCall(module, fn.symbol, args.map(arg => interpretTree(arg)))
         } else if (env.contains(fn.name)) {
           env(fn.name)
+        } else if (tree.symbol.is(InlineProxy)) {
+          interpretTree(tree.symbol.defTree.asInstanceOf[ValOrDefDef].rhs)
         } else {
           unexpectedTree(tree)
         }

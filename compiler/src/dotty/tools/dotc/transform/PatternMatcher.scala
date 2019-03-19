@@ -8,7 +8,7 @@ import collection.mutable
 import Symbols._, Contexts._, Types._, StdNames._, NameOps._
 import ast.Trees._
 import util.Spans._
-import typer.Applications.{isProductMatch, isGetMatch, productSelectors}
+import typer.Applications.{isProductMatch, isGetMatch, isProductSeqMatch, productSelectors, productArity}
 import SymUtils._
 import Flags._, Constants._
 import Decorators._
@@ -286,6 +286,21 @@ object PatternMatcher {
           matchElemsPlan(getResult, args, exact = true, onSuccess)
       }
 
+      /** Plan for matching the sequence in `getResult`
+       *
+       *  `getResult` is a product, where the last element is a sequence of elements.
+       */
+      def unapplyProductSeqPlan(getResult: Symbol, args: List[Tree], arity: Int): Plan = {
+        assert(arity <= args.size + 1)
+        val selectors = productSelectors(getResult.info).map(ref(getResult).select(_))
+
+        val matchSeq =
+          letAbstract(selectors.last) { seqResult =>
+            unapplySeqPlan(seqResult, args.drop(arity - 1))
+          }
+        matchArgsPlan(selectors.take(arity - 1), args.take(arity - 1), matchSeq)
+      }
+
       /** Plan for matching the result of an unapply against argument patterns `args` */
       def unapplyPlan(unapp: Tree, args: List[Tree]): Plan = {
         def caseClass = unapp.symbol.owner.linkedClass
@@ -306,12 +321,20 @@ object PatternMatcher {
                 .map(ref(unappResult).select(_))
               matchArgsPlan(selectors, args, onSuccess)
             }
+            else if (isProductSeqMatch(unapp.tpe.widen, args.length, unapp.sourcePos) && isUnapplySeq) {
+              val arity = productArity(unapp.tpe.widen, unapp.sourcePos)
+              unapplyProductSeqPlan(unappResult, args, arity)
+            }
             else {
               assert(isGetMatch(unapp.tpe))
               val argsPlan = {
                 val get = ref(unappResult).select(nme.get, _.info.isParameterless)
+                val arity = productArity(get.tpe, unapp.sourcePos)
                 if (isUnapplySeq)
-                  letAbstract(get)(unapplySeqPlan(_, args))
+                  letAbstract(get) { getResult =>
+                    if (arity > 0) unapplyProductSeqPlan(getResult, args, arity)
+                    else unapplySeqPlan(getResult, args)
+                  }
                 else
                   letAbstract(get) { getResult =>
                     val selectors =
@@ -330,15 +353,21 @@ object PatternMatcher {
       swapBind(tree) match {
         case Typed(pat, tpt) =>
           TestPlan(TypeTest(tpt), scrutinee, tree.span,
-            letAbstract(ref(scrutinee).asInstance(tpt.tpe)) { casted =>
+            letAbstract(ref(scrutinee).cast(tpt.tpe)) { casted =>
               nonNull += casted
               patternPlan(casted, pat, onSuccess)
             })
         case UnApply(extractor, implicits, args) =>
-          val mt @ MethodType(_) = extractor.tpe.widen
-          var unapp = extractor.appliedTo(ref(scrutinee).ensureConforms(mt.paramInfos.head))
-          if (implicits.nonEmpty) unapp = unapp.appliedToArgs(implicits)
-          val unappPlan = unapplyPlan(unapp, args)
+          val unappPlan = if (defn.isBottomType(scrutinee.info)) {
+            // Generate a throwaway but type-correct plan.
+            // This plan will never execute because it'll be guarded by a `NonNullTest`.
+            ResultPlan(tpd.Throw(tpd.Literal(Constant(null))))
+          } else {
+            val mt @ MethodType(_) = extractor.tpe.widen
+            var unapp = extractor.appliedTo(ref(scrutinee).ensureConforms(mt.paramInfos.head))
+            if (implicits.nonEmpty) unapp = unapp.appliedToArgs(implicits)
+            unapplyPlan(unapp, args)
+          }
           if (scrutinee.info.isNotNull || nonNull(scrutinee)) unappPlan
           else TestPlan(NonNullTest, scrutinee, tree.span, unappPlan)
         case Bind(name, body) =>

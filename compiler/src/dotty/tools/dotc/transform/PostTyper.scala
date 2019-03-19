@@ -119,14 +119,16 @@ class PostTyper extends MacroTransform with IdentityDenotTransformer { thisPhase
     private def transformSelect(tree: Select, targs: List[Tree])(implicit ctx: Context): Tree = {
       val qual = tree.qualifier
       qual.symbol.moduleClass.denot match {
-        case pkg: PackageClassDenotation if !tree.symbol.maybeOwner.is(Package) =>
-          transformSelect(cpy.Select(tree)(qual select pkg.packageObj.symbol, tree.name), targs)
+        case pkg: PackageClassDenotation =>
+          val pobj = pkg.packageObjFor(tree.symbol)
+          if (pobj.exists)
+            return transformSelect(cpy.Select(tree)(qual.select(pobj), tree.name), targs)
         case _ =>
-          val tree1 = super.transform(tree)
-          constToLiteral(tree1) match {
-            case _: Literal => tree1
-            case _ => superAcc.transformSelect(tree1, targs)
-          }
+      }
+      val tree1 = super.transform(tree)
+      constToLiteral(tree1) match {
+        case _: Literal => tree1
+        case _ => superAcc.transformSelect(tree1, targs)
       }
     }
 
@@ -165,26 +167,6 @@ class PostTyper extends MacroTransform with IdentityDenotTransformer { thisPhase
         }
     }
 
-    /** 1. If we are in an inline method but not in a nested quote, mark the inline method
-     *  as a macro.
-     *
-     *  2. If selection is a quote or splice node, record that fact in the current compilation unit.
-     */
-    private def handleMeta(sym: Symbol)(implicit ctx: Context): Unit = {
-
-      def markAsMacro(c: Context): Unit =
-        if (c.owner eq c.outer.owner) markAsMacro(c.outer)
-        else if (c.owner.isInlineMethod) {
-          c.owner.setFlag(Macro)
-        }
-        else if (!c.outer.owner.is(Package)) markAsMacro(c.outer)
-
-      if (sym.isSplice || sym.isQuote) {
-        markAsMacro(ctx)
-        ctx.compilationUnit.needsStaging = true
-      }
-    }
-
     private object dropInlines extends TreeMap {
       override def transform(tree: Tree)(implicit ctx: Context): Tree = tree match {
         case Inlined(call, _, _) =>
@@ -196,13 +178,11 @@ class PostTyper extends MacroTransform with IdentityDenotTransformer { thisPhase
     override def transform(tree: Tree)(implicit ctx: Context): Tree =
       try tree match {
         case tree: Ident if !tree.isType =>
-          handleMeta(tree.symbol)
           tree.tpe match {
             case tpe: ThisType => This(tpe.cls).withSpan(tree.span)
             case _ => tree
           }
         case tree @ Select(qual, name) =>
-          handleMeta(tree.symbol)
           if (name.isTypeName) {
             Checking.checkRealizable(qual.tpe, qual.posd)
             super.transform(tree)(ctx.addMode(Mode.Type))
@@ -278,7 +258,14 @@ class PostTyper extends MacroTransform with IdentityDenotTransformer { thisPhase
         case tree @ Annotated(annotated, annot) =>
           cpy.Annotated(tree)(transform(annotated), transformAnnot(annot))
         case tree: AppliedTypeTree =>
-          Checking.checkAppliedType(tree, boundsCheck = !ctx.mode.is(Mode.Pattern))
+          if (tree.tpt.symbol == defn.andType)
+            Checking.checkNonCyclicInherited(tree.tpe, tree.args.tpes, EmptyScope, tree.posd)
+              // Ideally, this should be done by Typer, but we run into cyclic references
+              // when trying to typecheck self types which are intersections.
+          else if (tree.tpt.symbol == defn.orType)
+            () // nothing to do
+          else
+            Checking.checkAppliedType(tree, boundsCheck = !ctx.mode.is(Mode.Pattern))
           super.transform(tree)
         case SingletonTypeTree(ref) =>
           Checking.checkRealizable(ref.tpe, ref.posd)
@@ -290,15 +277,10 @@ class PostTyper extends MacroTransform with IdentityDenotTransformer { thisPhase
               case tpe => tpe
             }
           )
-        case tree: AndTypeTree =>
-          // Ideally, this should be done by Typer, but we run into cyclic references
-          // when trying to typecheck self types which are intersections.
-          Checking.checkNonCyclicInherited(tree.tpe, tree.left.tpe :: tree.right.tpe :: Nil, EmptyScope, tree.posd)
-          super.transform(tree)
         case tree: LambdaTypeTree =>
           VarianceChecker.checkLambda(tree)
           super.transform(tree)
-        case Import(expr, selectors) =>
+        case Import(_, expr, selectors) =>
           val exprTpe = expr.tpe
           val seen = mutable.Set.empty[Name]
           def checkIdent(ident: untpd.Ident): Unit = {

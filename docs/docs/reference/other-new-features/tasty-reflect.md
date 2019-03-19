@@ -24,7 +24,7 @@ To provide reflection capabilities in macros we need to add an implicit paramete
 import scala.quoted._
 import scala.tasty._
 
-inline def natConst(x: Int): Int = ~natConstImpl('(x))
+inline def natConst(x: Int): Int = ~natConstImpl('x)
 
 def natConstImpl(x: Expr[Int])(implicit reflection: Reflection): Expr[Int] = {
   import reflection._
@@ -88,54 +88,50 @@ TASTy Reflect provides the following types:
 +- Tree -+- PackageClause
          +- Import
          +- Statement -+- Definition --+- PackageDef
-                       |               +- ClassDef
-                       |               +- TypeDef
-                       |               +- DefDef
-                       |               +- ValDef
-                       |
-                       +- Term --------+- Ident
-                                       +- Select
-                                       +- Literal
-                                       +- This
-                                       +- New
-                                       +- NamedArg
-                                       +- Apply
-                                       +- TypeApply
-                                       +- Super
-                                       +- Typed
-                                       +- Assign
-                                       +- Block
-                                       +- Lambda
-                                       +- If
-                                       +- Match
-                                       +- Try
-                                       +- Return
-                                       +- Repeated
-                                       +- Inlined
-                                       +- SelectOuter
-                                       +- While
-
-
-                       +- TypeTree ----+- Synthetic
-                       |               +- Ident
-                       |               +- Select
-                       |               +- Project
-                       |               +- Singleton
-+- TypeOrBoundsTree ---+               +- Refined
-                       |               +- Applied
-                       |               +- Annotated
-                       |               +- And
-                       |               +- Or
-                       |               +- MatchType
-                       |               +- ByName
-                       |               +- LambdaTypeTree
-                       |               +- Bind
-                       |
-                       +- TypeBoundsTree
-                       +- SyntheticBounds
-
-+- CaseDef
-+- TypeCaseDef
+         |             |               +- ClassDef
+         |             |               +- TypeDef
+         |             |               +- DefDef
+         |             |               +- ValDef
+         |             |
+         |             +- Term --------+- Ident
+         |                             +- Select
+         |                             +- Literal
+         |                             +- This
+         |                             +- New
+         |                             +- NamedArg
+         |                             +- Apply
+         |                             +- TypeApply
+         |                             +- Super
+         |                             +- Typed
+         |                             +- Assign
+         |                             +- Block
+         |                             +- Lambda
+         |                             +- If
+         |                             +- Match
+         |                             +- Try
+         |                             +- Return
+         |                             +- Repeated
+         |                             +- Inlined
+         |                             +- SelectOuter
+         |                             +- While
+         |
+         +- TypeTree ----+- Synthetic
+         |               +- Ident
+         |               +- Select
+         |               +- Project
+         |               +- Singleton
+         |               +- Refined
+         |               +- Applied
+         |               +- Annotated
+         |               +- MatchType
+         |               +- ByName
+         |               +- LambdaTypeTree
+         |               +- Bind
+         |
+         +- TypeBoundsTree
+         +- SyntheticBounds
+         +- CaseDef
+         +- TypeCaseDef
 
 +- Pattern --+- Value
              +- Bind
@@ -177,6 +173,8 @@ TASTy Reflect provides the following types:
 
 +- Position
 
++- Comment
+
 +- Constant
 
 +- Symbol --+- PackageSymbol
@@ -187,8 +185,6 @@ TASTy Reflect provides the following types:
             +- BindSymbol
             +- NoSymbol
 
-Aliases:
- # TermOrTypeTree = Term | TypeTree
 ```
 
 ## More Examples

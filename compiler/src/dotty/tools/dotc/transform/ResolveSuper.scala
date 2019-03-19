@@ -12,28 +12,18 @@ import DenotTransformers._
 import NameOps._
 import NameKinds._
 import ResolveSuper._
+import reporting.diagnostic.messages.IllegalSuperAccessor
 
-/** This phase adds super accessors and method overrides where
- *  linearization differs from Java's rule for default methods in interfaces.
- *  In particular:
+/** This phase implements super accessors in classes that need them.
  *
- *        For every trait M directly implemented by the class (see SymUtils.mixin), in
- *        reverse linearization order, add the following definitions to C:
+ *  For every trait M directly implemented by the class (see SymUtils.mixin), in
+ *  reverse linearization order, add the following definitions to C:
  *
- *          3.1 (done in `superAccessors`) For every superAccessor
- *              `<mods> def super$f[Ts](ps1)...(psN): U` in M:
+ *  For every superAccessor `<mods> def super$f[Ts](ps1)...(psN): U` in M:
  *
- *                <mods> def super$f[Ts](ps1)...(psN): U = super[S].f[Ts](ps1)...(psN)
+ *       <mods> def super$f[Ts](ps1)...(psN): U = super[S].f[Ts](ps1)...(psN)
  *
- *              where `S` is the superclass of `M` in the linearization of `C`.
- *
- *          3.2 (done in `methodOverrides`) For every method
- *              `<mods> def f[Ts](ps1)...(psN): U` in M` that needs to be disambiguated:
- *
- *                <mods> def f[Ts](ps1)...(psN): U = super[M].f[Ts](ps1)...(psN)
- *
- *        A method in M needs to be disambiguated if it is concrete, not overridden in C,
- *        and if it overrides another concrete method.
+ *  where `S` is the superclass of `M` in the linearization of `C`.
  *
  *  This is the first part of what was the mixin phase. It is complemented by
  *  Mixin, which runs after erasure.
@@ -58,17 +48,10 @@ class ResolveSuper extends MiniPhase with IdentityDenotTransformer { thisPhase =
       for (superAcc <- mixin.info.decls.filter(_.isSuperAccessor))
         yield {
           util.Stats.record("super accessors")
-          polyDefDef(implementation(superAcc.asTerm), forwarder(rebindSuper(cls, superAcc)))
+          polyDefDef(mkForwarder(superAcc.asTerm), forwarder(rebindSuper(cls, superAcc)))
         }
 
-    def methodOverrides(mixin: ClassSymbol): List[Tree] =
-      for (meth <- mixin.info.decls.toList if needsForwarder(meth))
-        yield {
-          util.Stats.record("method forwarders")
-          polyDefDef(implementation(meth.asTerm), forwarder(meth))
-        }
-
-    val overrides = mixins.flatMap(mixin => superAccessors(mixin) ::: methodOverrides(mixin))
+    val overrides = mixins.flatMap(superAccessors)
 
     cpy.Template(impl)(body = overrides ::: impl.body)
   }
@@ -101,9 +84,18 @@ object ResolveSuper {
     ctx.debuglog(i"starting rebindsuper from $base of ${acc.showLocated}: ${acc.info} in $bcs, name = $memberName")
     while (bcs.nonEmpty && sym == NoSymbol) {
       val other = bcs.head.info.nonPrivateDecl(memberName)
-      if (ctx.settings.Ydebug.value)
-        ctx.log(i"rebindsuper ${bcs.head} $other deferred = ${other.symbol.is(Deferred)}")
-      sym = other.matchingDenotation(base.thisType, base.thisType.memberInfo(acc)).symbol
+        .matchingDenotation(base.thisType, base.thisType.memberInfo(acc))
+      ctx.debuglog(i"rebindsuper ${bcs.head} $other deferred = ${other.symbol.is(Deferred)}")
+      if (other.exists) {
+        sym = other.symbol
+        // Having a matching denotation is not enough: it should also be a subtype
+        // of the superaccessor's type, see i5433.scala for an example where this matters
+        val otherTp = other.asSeenFrom(base.typeRef).info
+        val accTp = acc.asSeenFrom(base.typeRef).info
+        if (!(otherTp <:< accTp))
+          ctx.error(IllegalSuperAccessor(base, memberName, acc, accTp, other.symbol, otherTp), base.sourcePos)
+      }
+
       bcs = bcs.tail
     }
     assert(sym.exists)

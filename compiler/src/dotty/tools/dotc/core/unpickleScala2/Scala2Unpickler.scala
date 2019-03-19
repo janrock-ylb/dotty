@@ -91,7 +91,7 @@ object Scala2Unpickler {
       cls.enter(constr, scope)
     }
 
-  def setClassInfo(denot: ClassDenotation, info: Type, selfInfo: Type = NoType)(implicit ctx: Context): Unit = {
+  def setClassInfo(denot: ClassDenotation, info: Type, fromScala2: Boolean, selfInfo: Type = NoType)(implicit ctx: Context): Unit = {
     val cls = denot.classSymbol
     val (tparams, TempClassInfoType(parents, decls, clazz)) = info match {
       case TempPolyType(tps, cinfo) => (tps, cinfo)
@@ -106,9 +106,11 @@ object Scala2Unpickler {
       else selfInfo
     val tempInfo = new TempClassInfo(denot.owner.thisType, cls, decls, ost)
     denot.info = tempInfo // first rough info to avoid CyclicReferences
+    val parents1 = if (parents.isEmpty) defn.ObjectType :: Nil else parents.map(_.dealias)
+    // Add extra parents to the tuple classes from the standard library
     val normalizedParents =
-      defn.adjustForTuple(cls, tparams,
-      	if (parents.isEmpty) defn.ObjectType :: Nil else parents.map(_.dealias))
+      if (fromScala2) defn.adjustForTuple(cls, tparams, parents1)
+      else parents1 // We are setting the info of a Java class, so it cannot be one of the tuple classes
     for (tparam <- tparams) {
       val tsym = decls.lookup(tparam.name)
       if (tsym.exists) tsym.setFlag(TypeParam)
@@ -472,8 +474,6 @@ class Scala2Unpickler(bytes: Array[Byte], classRoot: ClassDenotation, moduleClas
     def finishSym(sym: Symbol): Symbol = {
       if (sym.isClass) {
         sym.setFlag(Scala2x)
-        if (flags.is(Trait) && ctx.mode.is(Mode.Java8Unpickling))
-          sym.setFlag(Scala_2_12_Trait)
       }
       if (!(isRefinementClass(sym) || isUnpickleRoot(sym) || (sym is Scala2Existential))) {
         val owner = sym.owner
@@ -553,7 +553,7 @@ class Scala2Unpickler(bytes: Array[Byte], classRoot: ClassDenotation, moduleClas
         denot match {
           case denot: ClassDenotation =>
             val selfInfo = if (atEnd) NoType else readTypeRef()
-            setClassInfo(denot, tp, selfInfo)
+            setClassInfo(denot, tp, fromScala2 = true, selfInfo)
           case denot =>
             val tp1 = translateTempPoly(tp)
             denot.info =
@@ -1049,8 +1049,7 @@ class Scala2Unpickler(bytes: Array[Byte], classRoot: ClassDenotation, moduleClas
           val to = untpd.Ident(toName)
           if (toName.isEmpty) from else untpd.Thicket(from, untpd.Ident(toName))
         })
-
-        Import(expr, selectors)
+        Import(impliedOnly = false, expr, selectors)
 
       case TEMPLATEtree =>
         setSym()

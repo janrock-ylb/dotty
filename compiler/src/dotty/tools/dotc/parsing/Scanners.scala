@@ -100,13 +100,12 @@ object Scanners {
     def finishNamed(idtoken: Token = IDENTIFIER, target: TokenData = this): Unit = {
       target.name = termName(flushBuf(litBuf))
       target.token = idtoken
-      if (idtoken == IDENTIFIER) {
-        val idx = target.name.start
-        target.token = toToken(idx)
-      }
+      if (idtoken == IDENTIFIER)
+        target.token = toToken(target.name)
     }
 
-    def toToken(idx: Int): Token
+    /** The token for given `name`. Either IDENTIFIER or a keyword. */
+    def toToken(name: SimpleName): Token
 
     /** Clear buffer and set string */
     def setStrVal(): Unit =
@@ -205,10 +204,8 @@ object Scanners {
 
     private def handleMigration(keyword: Token): Token =
       if (!isScala2Mode) keyword
-      else if (  keyword == ENUM
-              || keyword == ERASED) treatAsIdent()
+      else if (scala3keywords.contains(keyword)) treatAsIdent()
       else keyword
-
 
     private def treatAsIdent() = {
       testScala2Mode(i"$name is now a keyword, write `$name` instead of $name to keep it as an identifier")
@@ -217,9 +214,11 @@ object Scanners {
       IDENTIFIER
     }
 
-    def toToken(idx: Int): Token =
+    def toToken(name: SimpleName): Token = {
+      val idx = name.start
       if (idx >= 0 && idx <= lastKeywordStart) handleMigration(kwArray(idx))
       else IDENTIFIER
+    }
 
     private class TokenData0 extends TokenData
 
@@ -407,6 +406,7 @@ object Scanners {
      */
     protected final def fetchToken(): Unit = {
       offset = charOffset - 1
+      name = null
       (ch: @switch) match {
         case ' ' | '\t' | CR | LF | FF =>
           nextChar()
@@ -521,22 +521,16 @@ object Scanners {
           def fetchSingleQuote() = {
             nextChar()
             if (isIdentifierStart(ch))
-              charLitOr { getIdentRest(); SYMBOLLIT }
+              charLitOr { getIdentRest(); QUOTEID }
             else if (isOperatorPart(ch) && (ch != '\\'))
-              charLitOr { getOperatorRest(); SYMBOLLIT }
-            else if (ch == '(' || ch == '{' || ch == '[') {
-              val tok = quote(ch)
-              charLitOr(tok)
-            }
-            else {
-              getLitChar()
-              if (ch == '\'') {
-                nextChar()
-                token = CHARLIT
-                setStrVal()
-              } else {
-                error("unclosed character literal")
-              }
+              charLitOr { getOperatorRest(); QUOTEID }
+            else ch match {
+              case '{' | '[' | ' ' | '\t' if lookaheadChar() != '\'' =>
+                token = QUOTE
+              case _ =>
+                getLitChar()
+                if (ch == '\'') finishCharLit()
+                else error("unclosed character literal")
             }
           }
           fetchSingleQuote()
@@ -966,9 +960,8 @@ object Scanners {
       }
       token = INTLIT
       if (base == 10 && ch == '.') {
-        val lookahead = lookaheadReader()
-        lookahead.nextChar()
-        if ('0' <= lookahead.ch && lookahead.ch <= '9') {
+        val lch = lookaheadChar()
+        if ('0' <= lch && lch <= '9') {
           putChar('.'); nextChar(); getFraction()
         }
       } else (ch: @switch) match {
@@ -982,28 +975,24 @@ object Scanners {
       setStrVal()
     }
 
+    private def finishCharLit(): Unit = {
+      nextChar()
+      token = CHARLIT
+      setStrVal()
+    }
+
     /** Parse character literal if current character is followed by \',
      *  or follow with given op and return a symbol literal token
      */
     def charLitOr(op: => Token): Unit = {
       putChar(ch)
       nextChar()
-      if (ch == '\'') {
-        nextChar()
-        token = CHARLIT
-        setStrVal()
-      } else {
+      if (ch == '\'') finishCharLit()
+      else {
         token = op
         strVal = if (name != null) name.toString else null
         litBuf.clear()
       }
-    }
-
-    /** The opening quote bracket token corresponding to `c` */
-    def quote(c: Char): Token = c match {
-      case '(' => QPAREN
-      case '{' => QBRACE
-      case '[' => QBRACKET
     }
 
     override def toString: String =

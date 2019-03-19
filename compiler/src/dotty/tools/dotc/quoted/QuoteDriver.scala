@@ -36,9 +36,9 @@ class QuoteDriver extends Driver {
 
     val clazz = classLoader.loadClass(driver.outputClassName.toString)
     val method = clazz.getMethod("apply")
-    val instance = clazz.getConstructor().newInstance()
+    val inst = clazz.getConstructor().newInstance()
 
-    method.invoke(instance).asInstanceOf[T]
+    method.invoke(inst).asInstanceOf[T]
   }
 
   def show(expr: Expr[_], settings: Toolbox.Settings): String = {
@@ -47,7 +47,7 @@ class QuoteDriver extends Driver {
       val tree1 =
         if (ctx.settings.YshowRawQuoteTrees.value) tree
         else (new TreeCleaner).transform(tree)
-      new ReflectionImpl(ctx).showSourceCode.showTree(tree1)
+      ReflectionImpl.showTree(tree1)
     }
     withTree(expr, show, settings)
   }

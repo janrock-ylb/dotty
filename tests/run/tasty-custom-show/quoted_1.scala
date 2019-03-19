@@ -5,7 +5,7 @@ import scala.tasty.Reflection
 object Macros {
 
   implicit inline def printOwners[T](x: => T): Unit =
-    ~impl('(x))
+    ${ impl('x) }
 
   def impl[T](x: Expr[T])(implicit reflect: Reflection): Expr[Unit] = {
     import reflect._
@@ -35,16 +35,14 @@ object Macros {
 
     val tree = x.unseal
     output.traverseTree(tree)
-    '(print(~buff.result().toExpr))
+    '{print(${buff.result().toExpr})}
   }
 
   def dummyShow(implicit reflect: Reflection): reflect.Printer = {
     import reflect._
     new Printer {
       def showTree(tree: Tree)(implicit ctx: Context): String = "Tree"
-      def showCaseDef(caseDef: CaseDef)(implicit ctx: Context): String = "CaseDef"
       def showPattern(pattern: Pattern)(implicit ctx: Context): String = "Pattern"
-      def showTypeOrBoundsTree(tpt: TypeOrBoundsTree)(implicit ctx: Context): String = "TypeOrBoundsTree"
       def showTypeOrBounds(tpe: TypeOrBounds)(implicit ctx: Context): String = "TypeOrBounds"
       def showConstant(const: Constant)(implicit ctx: Context): String = "Constant"
       def showSymbol(symbol: Symbol)(implicit ctx: Context): String = "Symbol"

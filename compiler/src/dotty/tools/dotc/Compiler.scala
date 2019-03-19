@@ -37,6 +37,7 @@ class Compiler {
   /** Phases dealing with the frontend up to trees ready for TASTY pickling */
   protected def frontendPhases: List[List[Phase]] =
     List(new FrontEnd) ::           // Compiler frontend: scanner, parser, namer, typer
+    List(new Staging) ::            // Check PCP, heal quoted types and expand macros
     List(new sbt.ExtractDependencies) :: // Sends information on classes' dependencies to sbt via callbacks
     List(new PostTyper) ::          // Additional checks and cleanups after type checking
     List(new sbt.ExtractAPI) ::     // Sends a representation of the API of classes to sbt via callbacks
@@ -46,7 +47,7 @@ class Compiler {
   /** Phases dealing with TASTY tree pickling and unpickling */
   protected def picklerPhases: List[List[Phase]] =
     List(new Pickler) ::            // Generate TASTY info
-    List(new Staging) ::            // Expand macros and turn quoted trees into explicit run-time data structures
+    List(new ReifyQuotes) ::        // Turn quoted trees into explicit run-time data structures
     Nil
 
   /** Phases dealing with the transformation from pickled trees to backend trees */
@@ -62,7 +63,6 @@ class Compiler {
          new ExtensionMethods,       // Expand methods of value classes with extension methods
          new ShortcutImplicits,      // Allow implicit functions without creating closures
          new ByNameClosures,         // Expand arguments to by-name parameters to closures
-         new LiftTry,                // Put try expressions that might execute on non-empty stacks into their own methods
          new HoistSuperArgs,         // Hoist complex arguments of supercalls to enclosing scope
          new ClassOf,                // Expand `Predef.classOf` calls.
          new RefChecks) ::           // Various checks mostly related to abstract members and overriding
@@ -81,8 +81,8 @@ class Compiler {
          new ElimByName,             // Expand by-name parameter references
          new CollectNullableFields,  // Collect fields that can be nulled out after use in lazy initialization
          new ElimOuterSelect,        // Expand outer selections
-         new AugmentScala2Traits,    // Expand traits defined in Scala 2.x to simulate old-style rewritings
-         new ResolveSuper,           // Implement super accessors and add forwarders to trait methods
+         new AugmentScala2Traits,    // Augments Scala2 traits with additional members needed for mixin composition.
+         new ResolveSuper,           // Implement super accessors
          new FunctionXXLForwarders,  // Add forwarders for FunctionXXL apply method
          new ArrayConstructors) ::   // Intercept creation of (non-generic) arrays and intrinsify.
     List(new Erasure) ::             // Rewrite types to JVM model, erasing all type parameters, abstract types and refinements.
@@ -97,9 +97,10 @@ class Compiler {
     List(new Constructors,           // Collect initialization code in primary constructors
                                         // Note: constructors changes decls in transformTemplate, no InfoTransformers should be added after it
          new FunctionalInterfaces,   // Rewrites closures to implement @specialized types of Functions.
-         new Instrumentation,     // Count closure allocations under -Yinstrument-closures
-         new GetClass) ::            // Rewrites getClass calls on primitive types.
-    List(new LinkScala2Impls,        // Redirect calls to trait methods defined by Scala 2.x, so that they now go to their implementations
+         new Instrumentation,        // Count closure allocations under -Yinstrument-closures
+         new GetClass,               // Rewrites getClass calls on primitive types.
+         new LiftTry) ::             // Put try expressions that might execute on non-empty stacks into their own methods their implementations
+    List(new LinkScala2Impls,        // Redirect calls to trait methods defined by Scala 2.x, so that they now go to
          new LambdaLift,             // Lifts out nested functions to class scope, storing free variables in environments
                                         // Note: in this mini-phase block scopes are incorrect. No phases that rely on scopes should be here
          new ElimStaticThis) ::      // Replace `this` references to static objects by global identifiers

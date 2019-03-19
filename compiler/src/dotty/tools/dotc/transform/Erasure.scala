@@ -135,7 +135,7 @@ class Erasure extends Phase with DenotTransformer {
 
   def assertErased(tp: Type, tree: tpd.Tree = tpd.EmptyTree)(implicit ctx: Context): Unit = {
     def isAllowed(cls: Symbol, sourceName: String) =
-      tp.typeSymbol == cls && ctx.compilationUnit.source.file.name == sourceName
+      tp.widen.typeSymbol == cls && ctx.compilationUnit.source.file.name == sourceName
     assert(isErasedType(tp) ||
            isAllowed(defn.ArrayClass, "Array.scala") ||
            isAllowed(defn.TupleClass, "Tuple.scala") ||
@@ -319,8 +319,14 @@ object Erasure {
   class Typer(erasurePhase: DenotTransformer) extends typer.ReTyper with NoChecking {
     import Boxing._
 
+    def isErased(tree: Tree)(implicit ctx: Context): Boolean = tree match {
+      case TypeApply(Select(qual, _), _) if tree.symbol == defn.Any_typeCast =>
+        isErased(qual)
+      case _ => tree.symbol.isEffectivelyErased
+    }
+
     private def checkNotErased(tree: Tree)(implicit ctx: Context): tree.type = {
-      if (tree.symbol.isEffectivelyErased && !ctx.mode.is(Mode.Type))
+      if (isErased(tree) && !ctx.mode.is(Mode.Type))
         ctx.error(em"${tree.symbol} is declared as erased, but is in fact used", tree.sourcePos)
       tree
     }
@@ -501,7 +507,7 @@ object Erasure {
       val Apply(fun, args) = tree
       if (fun.symbol == defn.cbnArg)
         typedUnadapted(args.head, pt)
-      else typedExpr(fun, FunProto(args, pt)(this)) match {
+      else typedExpr(fun, FunProto(args, pt)(this, isContextual = false)) match {
         case fun1: Apply => // arguments passed in prototype were already passed
           fun1
         case fun1 =>

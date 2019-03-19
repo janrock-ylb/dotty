@@ -36,6 +36,16 @@ object TypeErasure {
   private def erasureDependsOnArgs(sym: Symbol)(implicit ctx: Context) =
     sym == defn.ArrayClass || sym == defn.PairClass
 
+  def normalizeClass(cls: ClassSymbol)(implicit ctx: Context): ClassSymbol = {
+    if (cls.owner == defn.ScalaPackageClass) {
+      if (defn.specialErasure.contains(cls))
+        return defn.specialErasure(cls)
+      if (cls == defn.UnitClass)
+        return defn.BoxedUnitClass
+    }
+    cls
+  }
+
   /** A predicate that tests whether a type is a legal erased type. Only asInstanceOf and
    *  isInstanceOf may have types that do not satisfy the predicate.
    *  ErasedValueType is considered an erased type because it is valid after Erasure (it is
@@ -248,54 +258,62 @@ object TypeErasure {
    *  The reason to pick last is that we prefer classes over traits that way,
    *  which leads to more predictable bytecode and (?) faster dynamic dispatch.
    */
-  def erasedLub(tp1: Type, tp2: Type)(implicit ctx: Context): Type = tp1 match {
-    case JavaArrayType(elem1) =>
-      import dotty.tools.dotc.transform.TypeUtils._
-      tp2 match {
-        case JavaArrayType(elem2) =>
-          if (elem1.isPrimitiveValueType || elem2.isPrimitiveValueType) {
-            if (elem1.classSymbol eq elem2.classSymbol) // same primitive
-              JavaArrayType(elem1)
-            else defn.ObjectType
-          } else JavaArrayType(erasedLub(elem1, elem2))
-        case _ => defn.ObjectType
-      }
-    case _ =>
-      tp2 match {
-        case JavaArrayType(_) => defn.ObjectType
-        case _ =>
-          val cls2 = tp2.classSymbol
+  def erasedLub(tp1: Type, tp2: Type)(implicit ctx: Context): Type = {
+    // After erasure, C | {Null, Nothing} is just C, if C is a reference type.
+    // We need to short-circuit this case here because the regular lub logic below
+    // relies on the class hierarchy, which doesn't properly capture `Null`s subtyping
+    // behaviour.
+    if (defn.isBottomType(tp1) && tp2.derivesFrom(defn.ObjectClass)) return tp2
+    if (defn.isBottomType(tp2) && tp1.derivesFrom(defn.ObjectClass)) return tp1
+    tp1 match {
+      case JavaArrayType(elem1) =>
+        import dotty.tools.dotc.transform.TypeUtils._
+        tp2 match {
+          case JavaArrayType(elem2) =>
+            if (elem1.isPrimitiveValueType || elem2.isPrimitiveValueType) {
+              if (elem1.classSymbol eq elem2.classSymbol) // same primitive
+                JavaArrayType(elem1)
+              else defn.ObjectType
+            } else JavaArrayType(erasedLub(elem1, elem2))
+          case _ => defn.ObjectType
+        }
+      case _ =>
+        tp2 match {
+          case JavaArrayType(_) => defn.ObjectType
+          case _ =>
+            val cls2 = tp2.classSymbol
 
-          /** takeWhile+1 */
-          def takeUntil[T](l: List[T])(f: T => Boolean): List[T] = {
-            @tailrec def loop(tail: List[T], acc: List[T]): List[T] =
-              tail match {
-                case h :: t => loop(if (f(h)) t else Nil, h :: acc)
-                case Nil    => acc.reverse
-              }
-            loop(l, Nil)
-          }
+            /** takeWhile+1 */
+            def takeUntil[T](l: List[T])(f: T => Boolean): List[T] = {
+              @tailrec def loop(tail: List[T], acc: List[T]): List[T] =
+                tail match {
+                  case h :: t => loop(if (f(h)) t else Nil, h :: acc)
+                  case Nil    => acc.reverse
+                }
+              loop(l, Nil)
+            }
 
-          // We are not interested in anything that is not a supertype of tp2
-          val tp2superclasses = tp1.baseClasses.filter(cls2.derivesFrom)
+            // We are not interested in anything that is not a supertype of tp2
+            val tp2superclasses = tp1.baseClasses.filter(cls2.derivesFrom)
 
-          // From the spec, "Linearization also satisfies the property that a
-          // linearization of a class always contains the linearization of its
-          // direct superclass as a suffix"; it's enough to consider every
-          // candidate up to the first class.
-          val candidates = takeUntil(tp2superclasses)(!_.is(Trait))
+            // From the spec, "Linearization also satisfies the property that a
+            // linearization of a class always contains the linearization of its
+            // direct superclass as a suffix"; it's enough to consider every
+            // candidate up to the first class.
+            val candidates = takeUntil(tp2superclasses)(!_.is(Trait))
 
-          // Candidates st "no other common superclass or trait derives from S"
-          val minimums = candidates.filter { cand =>
-            candidates.forall(x => !x.derivesFrom(cand) || x.eq(cand))
-          }
+            // Candidates st "no other common superclass or trait derives from S"
+            val minimums = candidates.filter { cand =>
+              candidates.forall(x => !x.derivesFrom(cand) || x.eq(cand))
+            }
 
-          // Pick the last minimum to prioritise classes over traits
-          minimums.lastOption match {
-            case Some(lub) => valueErasure(lub.typeRef)
-            case _ => defn.ObjectType
-          }
-      }
+            // Pick the last minimum to prioritise classes over traits
+            minimums.lastOption match {
+              case Some(lub) => valueErasure(lub.typeRef)
+              case _ => defn.ObjectType
+            }
+        }
+    }
   }
 
   /** The erased greatest lower bound of two erased type picks one of the two argument types.
@@ -520,16 +538,6 @@ class TypeErasure(isJava: Boolean, semiEraseVCs: Boolean, isConstructor: Boolean
       else this(tp)
     case _ =>
       this(tp)
-  }
-
-  private def normalizeClass(cls: ClassSymbol)(implicit ctx: Context): ClassSymbol = {
-    if (cls.owner == defn.ScalaPackageClass) {
-      if (defn.specialErasure.contains(cls))
-        return defn.specialErasure(cls)
-      if (cls == defn.UnitClass)
-        return defn.BoxedUnitClass
-    }
-    cls
   }
 
   /** The name of the type as it is used in `Signature`s.
